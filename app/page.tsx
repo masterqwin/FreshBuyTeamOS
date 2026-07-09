@@ -633,7 +633,6 @@ export default function Home() {
           item={priceModal.item}
           mode={priceModal.mode}
           price={buyPrice}
-          onPriceChange={setBuyPrice}
           onKey={appendBuyPrice}
           onBackspace={backspaceBuyPrice}
           onConfirm={confirmBought}
@@ -674,7 +673,6 @@ function BuyPriceModal({
   item,
   mode,
   price,
-  onPriceChange,
   onKey,
   onBackspace,
   onConfirm,
@@ -683,7 +681,6 @@ function BuyPriceModal({
   item: FreshBuyItem;
   mode: PriceModalMode;
   price: string;
-  onPriceChange: (value: string) => void;
   onKey: (value: string) => void;
   onBackspace: () => void;
   onConfirm: () => void;
@@ -702,18 +699,12 @@ function BuyPriceModal({
         </div>
 
         <label className="mt-4 block text-sm font-bold text-emerald-100/70">ราคาซื้อจริง</label>
-        <input
-          value={price}
-          onChange={(event) => {
-            const nextValue = event.target.value.replace(/[^\d.]/g, "");
-            const parts = nextValue.split(".");
-            onPriceChange(parts.length > 2 ? `${parts[0]}.${parts.slice(1).join("")}` : nextValue);
-          }}
-          inputMode="decimal"
-          autoFocus
-          className="mt-2 h-14 w-full rounded-lg border border-market-line bg-market-ink px-4 text-center text-3xl font-black text-white outline-none focus:border-market-mint"
-          placeholder="0"
-        />
+        <div
+          className="mt-2 flex h-14 w-full items-center justify-center rounded-lg border border-market-line bg-market-ink px-4 text-center text-3xl font-black text-white"
+          aria-live="polite"
+        >
+          {price || "0"}
+        </div>
 
         <div className="mt-4 grid grid-cols-3 gap-2">
           {keys.map((key) => (
