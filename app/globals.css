@@ -1,0 +1,179 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  background: #07110f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(34, 197, 94, 0.18), transparent 34rem),
+    linear-gradient(135deg, #07110f 0%, #0b1614 48%, #081512 100%);
+  color: #ecfdf5;
+  font-family: Arial, "Noto Sans Thai", "Tahoma", sans-serif;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 4mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-size: 10px !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-area {
+    display: block !important;
+    color: #111827 !important;
+    background: #ffffff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .print-header {
+    margin: 0 0 5px !important;
+    color: #111827 !important;
+  }
+
+  .print-header h1 {
+    margin: 0 !important;
+    font-size: 14px !important;
+    line-height: 1.2 !important;
+    font-weight: 800 !important;
+  }
+
+  .print-header p {
+    display: inline-block;
+    margin: 1px 10px 2px 0 !important;
+    font-size: 10px !important;
+    line-height: 1.2 !important;
+  }
+
+  .print-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 4mm !important;
+    align-items: start !important;
+  }
+
+  .print-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+    color: #111827 !important;
+    background: #ffffff !important;
+    font-size: 12px !important;
+    line-height: 1.12 !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-table th,
+  .print-table td {
+    border: 0.45px solid #111827 !important;
+    padding: 2px 3px !important;
+    height: 22px !important;
+    max-height: 24px !important;
+    vertical-align: middle !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    overflow: hidden !important;
+  }
+
+  .print-table th {
+    font-size: 12.5px !important;
+    font-weight: 800 !important;
+    text-align: center !important;
+  }
+
+  .print-table th:nth-child(1),
+  .print-table td:nth-child(1) {
+    width: 55% !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+  }
+
+  .print-table th:nth-child(2),
+  .print-table td:nth-child(2) {
+    width: 10% !important;
+    font-size: 11px !important;
+    text-align: center !important;
+  }
+
+  .print-table th:nth-child(3),
+  .print-table td:nth-child(3) {
+    width: 8% !important;
+    font-size: 11px !important;
+    text-align: center !important;
+  }
+
+  .print-table th:nth-child(4),
+  .print-table td:nth-child(4),
+  .print-table th:nth-child(5),
+  .print-table td:nth-child(5) {
+    width: 9% !important;
+    text-align: center !important;
+  }
+
+  .print-table th:nth-child(6),
+  .print-table td:nth-child(6) {
+    width: 9% !important;
+  }
+
+  .print-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-empty {
+    height: 24px !important;
+    text-align: center !important;
+    font-weight: 700 !important;
+  }
+
+  .print-check-box {
+    display: inline-block !important;
+    width: 12px !important;
+    height: 12px !important;
+    border: 1px solid #111827 !important;
+    vertical-align: middle !important;
+  }
+
+  .print-price-line {
+    display: block !important;
+    width: 100% !important;
+    height: 14px !important;
+    border-bottom: 1px solid #111827 !important;
+  }
+}

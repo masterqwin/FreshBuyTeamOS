@@ -1,0 +1,19 @@
+{
+  "name": "FreshBuy Team OS",
+  "short_name": "FreshBuy",
+  "description": "ระบบเช็กลิสต์ซื้อผักสดสำหรับทีมเล็ก",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#07110f",
+  "theme_color": "#16a34a",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icons/freshbuy-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
