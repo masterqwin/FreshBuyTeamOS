@@ -67,6 +67,25 @@ cycle uses the existing atomic global clear RPC and never changes Product Master
 The previous Excel parser remains available inside the collapsed owner-only
 legacy tools section.
 
+### โทร/LINE สั่ง
+
+Product Master supports `purchase_method = walk | phone`. Existing products
+default to `walk`; phone products require a free-form `supplier_name`. Run the
+following non-destructive migration manually in Supabase SQL Editor before using
+this application version:
+
+```text
+supabase/phone_order_fulfillment.sql
+```
+
+Phone/LINE products are written to the separate realtime table
+`phone_order_items`, never to `buy_items`. The `รายการโทรสั่ง` page groups the
+current rows by supplier, copies one LINE-ready message per supplier, and allows
+an individual row to be returned to Product Check. The existing
+`freshbuy_clear_all_items()` RPC is replaced by the migration so starting a new
+working cycle clears both operational tables atomically while preserving Product
+Master.
+
 ข้อมูลออนไลน์ V1.3 ใช้ Single Global Buy List จาก Supabase table `buy_items` เพียงตารางเดียว ทุกอุปกรณ์อ่านและแก้รายการชุดเดียวกันจากทั้งตารางโดยไม่ filter ด้วย `day_key`, `activeDayKey`, `batch_id`, current date หรือ localStorage key
 
 คอลัมน์ `day_key` เดิมยังอยู่เพื่อ compatibility/backup แต่ application logic ไม่ใช้เลือกชุดข้อมูลที่แสดงหรือแก้ไขแล้ว

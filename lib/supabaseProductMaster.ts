@@ -3,7 +3,7 @@ import {
   type RealtimePostgresChangesPayload,
 } from "@supabase/supabase-js";
 import { supabase, type ItemRealtimeStatus } from "./supabaseFreshBuy";
-import type { ProductCategory, ProductMasterInput, ProductMasterItem, ProductUnit } from "./types";
+import type { ProductCategory, ProductMasterInput, ProductMasterItem, ProductUnit, PurchaseMethod } from "./types";
 
 type ProductMasterRow = {
   id: string;
@@ -12,6 +12,8 @@ type ProductMasterRow = {
   default_unit: string;
   default_max_price: string | null;
   note: string | null;
+  purchase_method: string;
+  supplier_name: string | null;
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -45,6 +47,8 @@ function toProduct(row: ProductMasterRow): ProductMasterItem {
     defaultUnit: row.default_unit as ProductUnit,
     defaultMaxPrice: parsePrice(row.default_max_price),
     note: row.note ?? "",
+    purchaseMethod: (row.purchase_method ?? "walk") as PurchaseMethod,
+    supplierName: row.supplier_name ?? "",
     active: row.active,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -58,6 +62,8 @@ function toInsertRow(product: ProductMasterInput) {
     default_unit: product.defaultUnit.trim(),
     default_max_price: product.defaultMaxPrice === "" ? null : String(product.defaultMaxPrice),
     note: product.note.trim() || null,
+    purchase_method: product.purchaseMethod,
+    supplier_name: product.purchaseMethod === "phone" ? product.supplierName.trim() : null,
     active: true,
   };
 }

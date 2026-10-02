@@ -26,6 +26,8 @@ import {
   type ProductMasterInput,
   type ProductMasterItem,
   type ProductUnit,
+  type PurchaseMethod,
+  type PhoneOrderItem,
 } from "@/lib/types";
 
 type CategoryFilter = "ทั้งหมด" | ProductCategory;
@@ -38,6 +40,8 @@ type ProductEditorState = {
   defaultUnit: string;
   defaultMaxPrice: string;
   note: string;
+  purchaseMethod: PurchaseMethod;
+  supplierName: string;
 };
 
 const ALL_CATEGORY_FILTERS: CategoryFilter[] = ["ทั้งหมด", ...PRODUCT_CATEGORIES];
@@ -76,6 +80,8 @@ const EMPTY_EDITOR: ProductEditorState = {
   defaultUnit: "กก.",
   defaultMaxPrice: "",
   note: "",
+  purchaseMethod: "walk",
+  supplierName: "",
 };
 
 function hasPurchaseQuantity(value: string) {
@@ -119,7 +125,9 @@ function initializeCheckValues(
 
 export default function ProductCheckPage({
   currentBuyItems,
-  onSend,
+  currentPhoneOrderItems,
+  onSendWalk,
+  onSendPhone,
   onStartNewCycle,
   isAdminUnlocked,
   isAdminPinConfigured,
@@ -130,7 +138,9 @@ export default function ProductCheckPage({
   isClearingToday,
 }: {
   currentBuyItems: FreshBuyItem[];
-  onSend: (items: FreshBuyItem[]) => Promise<boolean>;
+  currentPhoneOrderItems: PhoneOrderItem[];
+  onSendWalk: (items: FreshBuyItem[]) => Promise<boolean>;
+  onSendPhone: (item: PhoneOrderItem) => Promise<boolean>;
   onStartNewCycle: () => Promise<boolean>;
   isAdminUnlocked: boolean;
   isAdminPinConfigured: boolean | null;
@@ -167,7 +177,13 @@ export default function ProductCheckPage({
     try {
       if (!isSupabaseConfigured) {
         const saved = window.localStorage.getItem(PRODUCT_MASTER_STORAGE_KEY);
-        const localProducts = saved ? (JSON.parse(saved) as ProductMasterItem[]) : [];
+        const localProducts = saved
+          ? (JSON.parse(saved) as ProductMasterItem[]).map((product) => ({
+              ...product,
+              purchaseMethod: product.purchaseMethod ?? "walk",
+              supplierName: product.supplierName ?? "",
+            }))
+          : [];
         applyProducts(localProducts.filter((product) => product.active), clearQuantities);
         setProductRealtimeStatus("ออฟไลน์");
       } else {
@@ -234,17 +250,25 @@ export default function ProductCheckPage({
     const currentProductNames = new Set(
       currentBuyItems.map((item) => normalizeProductName(item.name)),
     );
+    const currentPhoneProductIds = new Set(
+      currentPhoneOrderItems.map((item) => item.productMasterId).filter(Boolean),
+    );
+    const currentPhoneProductNames = new Set(
+      currentPhoneOrderItems.map((item) => normalizeProductName(item.productName)),
+    );
     return products.filter((product) => {
       if (currentProductNames.has(normalizeProductName(product.name))) return false;
+      if (currentPhoneProductIds.has(product.id)) return false;
+      if (currentPhoneProductNames.has(normalizeProductName(product.name))) return false;
       const matchesCategory = categoryFilter === "ทั้งหมด" || product.category === categoryFilter;
       const matchesSearch = !query || product.name.toLocaleLowerCase("th-TH").includes(query);
       return matchesCategory && matchesSearch;
     });
-  }, [categoryFilter, currentBuyItems, products, searchText]);
+  }, [categoryFilter, currentBuyItems, currentPhoneOrderItems, products, searchText]);
 
   async function startNewCheck() {
     if (isStartingNewCycle) return;
-    if (!window.confirm("เริ่มรอบใหม่จะล้างรายการซื้อรอบปัจจุบันจากทุกเมนู\nแต่จะไม่ลบข้อมูลสินค้า Product Master\nต้องการดำเนินการต่อหรือไม่?")) return;
+    if (!window.confirm("เริ่มรอบใหม่จะล้างทั้งรายการซื้อวันนี้และรายการโทรสั่ง\nแต่จะไม่ลบข้อมูลสินค้า Product Master\nต้องการดำเนินการต่อหรือไม่?")) return;
 
     setIsStartingNewCycle(true);
     setProductError("");
@@ -287,7 +311,19 @@ export default function ProductCheckPage({
     setSendingProductIds(Array.from(sendingProductIdsRef.current));
     setProductError("");
     try {
-      const succeeded = await onSend(newItems);
+      const succeeded = product.purchaseMethod === "phone"
+        ? await onSendPhone({
+            id: createUuid(),
+            productMasterId: product.id,
+            productName: product.name,
+            quantity: value.quantity.trim(),
+            unit: value.unit,
+            supplierName: product.supplierName,
+            note: product.note,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          })
+        : await onSendWalk(newItems);
       if (!succeeded) setProductError(`ส่ง “${product.name}” ไม่สำเร็จ กรุณาลองอีกครั้ง`);
     } finally {
       sendingProductIdsRef.current.delete(product.id);
@@ -304,6 +340,8 @@ export default function ProductCheckPage({
       defaultUnit: normalizeProductUnit(product.defaultUnit),
       defaultMaxPrice: product.defaultMaxPrice === "" ? "" : String(product.defaultMaxPrice),
       note: product.note,
+      purchaseMethod: product.purchaseMethod,
+      supplierName: product.supplierName,
     });
   }
 
@@ -313,6 +351,11 @@ export default function ProductCheckPage({
     const defaultUnit = editor.defaultUnit.trim();
     if (!name || !defaultUnit) {
       window.alert("กรุณากรอกชื่อสินค้าและหน่วยปกติ");
+      return;
+    }
+    const supplierName = editor.supplierName.trim();
+    if (editor.purchaseMethod === "phone" && !supplierName) {
+      window.alert("กรุณากรอกชื่อร้านสำหรับสินค้าโทร/LINE สั่ง");
       return;
     }
 
@@ -337,6 +380,8 @@ export default function ProductCheckPage({
       defaultUnit: normalizeProductUnit(defaultUnit),
       defaultMaxPrice: parsedMaxPrice,
       note: editor.note.trim(),
+      purchaseMethod: editor.purchaseMethod,
+      supplierName: editor.purchaseMethod === "phone" ? supplierName : "",
     };
 
     setIsSavingProduct(true);
@@ -521,6 +566,15 @@ export default function ProductCheckPage({
                     <span className={`rounded-md border px-2 py-1 text-[11px] font-black ${categoryStyle.badge}`}>
                       {product.category}
                     </span>
+                    <span className={`rounded-md border px-2 py-1 text-[11px] font-black ${
+                      product.purchaseMethod === "phone"
+                        ? "border-sky-300/35 bg-sky-300/10 text-sky-100"
+                        : "border-emerald-300/30 bg-emerald-300/8 text-emerald-100"
+                    }`}>
+                      {product.purchaseMethod === "phone"
+                        ? `โทร/LINE สั่ง · ${product.supplierName}`
+                        : "เดินซื้อเอง"}
+                    </span>
                   </div>
                   {(product.defaultMaxPrice !== "" || product.note) && (
                     <p className="mt-1 truncate text-xs font-semibold text-emerald-100/60">
@@ -565,8 +619,8 @@ export default function ProductCheckPage({
                     type="button"
                     onClick={() => void sendProduct(product)}
                     disabled={!selected || isSendingProduct}
-                    aria-label={`ส่ง ${product.name} ไปต้องซื้อวันนี้`}
-                    title="ส่งไปต้องซื้อวันนี้"
+                    aria-label={`ส่ง ${product.name} ไป${product.purchaseMethod === "phone" ? "รายการโทรสั่ง" : "รายการซื้อวันนี้"}`}
+                    title={product.purchaseMethod === "phone" ? "ส่งไปรายการโทรสั่ง" : "ส่งไปรายการซื้อวันนี้"}
                     className="mt-[19px] grid h-12 w-12 place-items-center rounded-lg bg-market-green text-market-ink disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300 sm:mt-0"
                   >
                     <Send className={`h-5 w-5 ${isSendingProduct ? "animate-pulse" : ""}`} />
@@ -624,6 +678,10 @@ export default function ProductCheckPage({
       {editor && (
         <ProductEditorModal
           editor={editor}
+          supplierSuggestions={Array.from(new Set(products
+            .filter((product) => product.active && product.supplierName.trim())
+            .map((product) => product.supplierName.trim())))
+            .sort((left, right) => left.localeCompare(right, "th"))}
           isSaving={isSavingProduct}
           onChange={setEditor}
           onSave={() => void saveProduct()}
@@ -636,12 +694,14 @@ export default function ProductCheckPage({
 
 function ProductEditorModal({
   editor,
+  supplierSuggestions,
   isSaving,
   onChange,
   onSave,
   onClose,
 }: {
   editor: ProductEditorState;
+  supplierSuggestions: string[];
   isSaving: boolean;
   onChange: (editor: ProductEditorState) => void;
   onSave: () => void;
@@ -686,6 +746,37 @@ function ProductEditorModal({
               ))}
             </select>
           </EditorField>
+          <EditorField label="วิธีจัดซื้อ *">
+            <select
+              value={editor.purchaseMethod}
+              onChange={(event) => {
+                const purchaseMethod = event.target.value as PurchaseMethod;
+                onChange({
+                  ...editor,
+                  purchaseMethod,
+                  supplierName: purchaseMethod === "walk" ? "" : editor.supplierName,
+                });
+              }}
+              className="h-12 w-full rounded-lg border border-market-line bg-market-ink px-3 font-bold text-white outline-none focus:border-market-mint"
+            >
+              <option value="walk">เดินซื้อเอง</option>
+              <option value="phone">โทร/LINE สั่ง</option>
+            </select>
+          </EditorField>
+          {editor.purchaseMethod === "phone" && (
+            <EditorField label="ชื่อร้าน *">
+              <input
+                value={editor.supplierName}
+                onChange={(event) => onChange({ ...editor, supplierName: event.target.value })}
+                list="product-supplier-suggestions"
+                placeholder="เลือกชื่อเดิมหรือพิมพ์ชื่อร้านใหม่"
+                className="h-12 w-full rounded-lg border border-market-line bg-market-ink px-3 font-bold text-white outline-none focus:border-market-mint"
+              />
+              <datalist id="product-supplier-suggestions">
+                {supplierSuggestions.map((supplier) => <option key={supplier} value={supplier} />)}
+              </datalist>
+            </EditorField>
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
             <EditorField label="หน่วยปกติ *">
               <select

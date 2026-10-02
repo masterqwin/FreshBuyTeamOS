@@ -62,10 +62,10 @@ Every work cycle:
 
 1. Optional: Backup CSV.
 2. Press `ล้างข้อมูลวันนี้`.
-3. This clears ALL rows from `buy_items`.
+3. This atomically clears ALL rows from `buy_items` and `phone_order_items`.
 4. Open `เช็คสินค้า` and press `เริ่มเช็คสินค้าที่ต้องซื้อใหม่`.
 5. Enter quantity/unit only for products that must be purchased.
-6. Press `ส่งรายการไป ต้องซื้อวันนี้`.
+6. Send each row; `walk` goes to `รายการซื้อวันนี้` and `phone` goes to `รายการโทรสั่ง`.
 7. Buy items.
 8. Check vehicle.
 9. Finish.
@@ -82,11 +82,12 @@ Rules:
 Navigation order:
 
 1. `เช็คสินค้า`
-2. `ต้องซื้อวันนี้`
-3. `ซื้อแล้ว`
-4. `ไม่มีของ`
-5. `เช็คขึ้นรถ`
-6. `ประวัติวันนี้`
+2. `รายการซื้อวันนี้`
+3. `รายการโทรสั่ง`
+4. `ซื้อแล้ว`
+5. `ไม่มีของ`
+6. `เช็คขึ้นรถ`
+7. `ประวัติวันนี้`
 
 ## Data Model Notes
 
@@ -147,6 +148,17 @@ Product Master additionally requires owner/admin review and manual execution of:
 ```text
 supabase/product_master.sql
 ```
+
+The phone/LINE fulfillment release additionally requires:
+
+```text
+supabase/phone_order_fulfillment.sql
+```
+
+This non-destructively adds Product Master purchase method/supplier fields,
+creates `phone_order_items`, enables its RLS and Realtime configuration, and
+replaces `freshbuy_clear_all_items()` so one transaction clears both operational
+lists. It must be run manually before the matching application is deployed.
 
 This creates `public.product_master`, its updated-at trigger, fixed category
 constraint, active-name uniqueness, anon select/insert/update policies, and
@@ -251,13 +263,30 @@ Known remaining work:
 - Product Master is permanent and independent from the global `buy_items` list.
 - Blank/zero quantity means not selected; entering a quantity selects the item.
 - Unit defaults from Product Master but remains editable for the current list.
-- Sending appends new `pending` rows through the existing `buy_items` path.
+- Sending `walk` products appends new `pending` rows through the existing `buy_items` path.
 - Sending never replaces or deletes existing global-list rows.
 - Rapid double submission is guarded in both the page and Home state.
 - Product removal is soft archive (`active=false`) and never changes history.
 - Categories are fixed for Phase 1: `ผักใบ`, `ผักผล`, `ผักเมืองหนาว`,
   `ผักแพ๊คและเห็ด`, `เครื่องเทศ`, `อื่นๆ`.
 - Product Master has its own Realtime subscription and localStorage fallback.
+- `walk` products append to `buy_items`; `phone` products append only to
+  `phone_order_items` with product/supplier snapshots.
+- Products already present in either operational list are hidden, using Product
+  Master id for phone orders with normalized-name fallback.
+- Phone supplier names are free-form with autocomplete suggestions from active
+  Product Master products; there is no Supplier Master in this phase.
+
+### Phone Order Page
+
+- `รายการโทรสั่ง` groups current `phone_order_items` by `supplier_name`.
+- Each supplier card copies a separate Thai LINE-ready order message.
+- `นำกลับไปเช็ค` deletes only the selected operational row and leaves Product
+  Master untouched.
+- Realtime subscriptions use a unique channel topic per subscriber and cleanup
+  through `removeChannel()`.
+- Starting a new working cycle clears both `buy_items` and `phone_order_items`
+  atomically; Product Master remains untouched.
 
 ### Legacy Import Page
 
@@ -428,6 +457,14 @@ Run npm run typecheck and npm run build after changes.
 ## CHANGELOG
 
 ### 2026-10-02
+
+1. Added Product Master fulfillment methods `walk` and `phone` plus optional supplier snapshots.
+2. Added the separate realtime `phone_order_items` operational list and grouped `รายการโทรสั่ง` page.
+3. Added per-supplier LINE-ready clipboard messages and `นำกลับไปเช็ค` correction.
+4. Extended the safe working-cycle RPC to clear both operational lists atomically.
+5. Preserved all buyer summaries, History, vehicle checks, and legacy import behavior on `buy_items`.
+
+### 2026-10-02 - Product Master release
 
 1. Added the Phase 1 Product Master architecture in a separate `product_master` table.
 2. Added the non-destructive manual migration `supabase/product_master.sql`.

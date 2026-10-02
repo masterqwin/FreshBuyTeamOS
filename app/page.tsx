@@ -2,10 +2,12 @@
 
 import {
   Check,
+  Copy,
   ClipboardList,
   FileDown,
   History,
   PackageX,
+  PhoneCall,
   RotateCcw,
   ShoppingBasket,
   Truck,
@@ -18,6 +20,7 @@ import {
   STATUS_LABELS,
   STATUS_STYLES,
   PRODUCT_MASTER_STORAGE_KEY,
+  PHONE_ORDER_STORAGE_KEY,
   STORAGE_KEY,
   formatDisplayTime,
   getSummary,
@@ -47,16 +50,26 @@ import {
   subscribeToProductMaster,
 } from "@/lib/supabaseProductMaster";
 import {
+  appendPhoneOrderItem,
+  deletePhoneOrderItem,
+  fetchPhoneOrderItems,
+  phoneOrderFromRealtimeRow,
+  removePhoneOrderSubscription,
+  subscribeToPhoneOrderItems,
+  type PhoneOrderRealtimePayload,
+} from "@/lib/supabasePhoneOrders";
+import {
   PRODUCT_CATEGORIES,
   type BuyerName,
   type FreshBuyItem,
   type ItemStatus,
   type ProductCategory,
   type ProductMasterItem,
+  type PhoneOrderItem,
   type VehicleStatus,
 } from "@/lib/types";
 
-type TabId = "products" | "pending" | "bought" | "unavailable" | "check" | "history";
+type TabId = "products" | "pending" | "phone-orders" | "bought" | "unavailable" | "check" | "history";
 type PriceModalMode = "buy" | "edit";
 type BoughtFilter = "bought" | "loaded" | "incomplete" | "unchecked";
 type PendingCategoryFilter = "ทั้งหมด" | ProductCategory;
@@ -72,6 +85,7 @@ const IMPORT_UNLOCK_STORAGE_KEY = "fresh-buy-import-unlocked-v1";
 const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "products", label: "เช็คสินค้า", icon: ClipboardList },
   { id: "pending", label: "รายการซื้อวันนี้", icon: ShoppingBasket },
+  { id: "phone-orders", label: "รายการโทรสั่ง", icon: PhoneCall },
   { id: "bought", label: "ซื้อแล้ว", icon: Check },
   { id: "unavailable", label: "ไม่มีของ", icon: PackageX },
   { id: "check", label: "เช็คขึ้นรถ", icon: Truck },
@@ -199,6 +213,19 @@ function mergeRealtimeItem(items: FreshBuyItem[], payload: ItemRealtimePayload) 
   return items.map((item, index) => (index === existingIndex ? nextItem : item));
 }
 
+function mergeRealtimePhoneOrder(items: PhoneOrderItem[], payload: PhoneOrderRealtimePayload) {
+  if (payload.eventType === "DELETE") {
+    const deletedId = (payload.old as { id?: string }).id;
+    return deletedId ? items.filter((item) => item.id !== deletedId) : items;
+  }
+
+  const nextItem = phoneOrderFromRealtimeRow(payload.new);
+  const existingIndex = items.findIndex((item) => item.id === nextItem.id);
+  return existingIndex === -1
+    ? [...items, nextItem]
+    : items.map((item, index) => (index === existingIndex ? nextItem : item));
+}
+
 function formatSyncClock(date: Date) {
   const parts = new Intl.DateTimeFormat("th-TH-u-nu-latn", {
     timeZone: "Asia/Bangkok",
@@ -236,6 +263,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<TabId>("products");
   const [activeBuyer, setActiveBuyer] = useState<BuyerName>("ผู้ซื้อ 1");
   const [items, setItems] = useState<FreshBuyItem[]>([]);
+  const [phoneOrderItems, setPhoneOrderItems] = useState<PhoneOrderItem[]>([]);
   const [pasteText, setPasteText] = useState(sampleData);
   const [hydrated, setHydrated] = useState(false);
   const [priceModal, setPriceModal] = useState<PriceModalState>(null);
@@ -255,6 +283,7 @@ export default function Home() {
   const [isClearingAllItems, setIsClearingAllItems] = useState(false);
   const savingItemIdsRef = useRef<Set<string>>(new Set());
   const submittingProductListRef = useRef(false);
+  const submittingPhoneOrderIdsRef = useRef<Set<string>>(new Set());
   const [isImportUnlocked, setIsImportUnlocked] = useState(false);
   const [isImportPinConfigured, setIsImportPinConfigured] = useState<boolean | null>(null);
   const [isAdminPinOpen, setIsAdminPinOpen] = useState(false);
@@ -311,6 +340,14 @@ export default function Home() {
         setItems([]);
       }
     }
+    const savedPhoneOrders = window.localStorage.getItem(PHONE_ORDER_STORAGE_KEY);
+    if (savedPhoneOrders) {
+      try {
+        setPhoneOrderItems(JSON.parse(savedPhoneOrders) as PhoneOrderItem[]);
+      } catch {
+        setPhoneOrderItems([]);
+      }
+    }
     setHydrated(true);
   }, []);
 
@@ -319,6 +356,12 @@ export default function Home() {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
     }
   }, [hydrated, items]);
+
+  useEffect(() => {
+    if (hydrated && !isSupabaseConfigured) {
+      window.localStorage.setItem(PHONE_ORDER_STORAGE_KEY, JSON.stringify(phoneOrderItems));
+    }
+  }, [hydrated, phoneOrderItems]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -351,6 +394,38 @@ export default function Home() {
 
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    let cancelled = false;
+
+    void fetchPhoneOrderItems()
+      .then((remoteItems) => {
+        if (!cancelled) setPhoneOrderItems(remoteItems);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          logSupabaseError("Phone order load failed", error);
+          setSyncError("โหลดรายการโทรสั่งไม่สำเร็จ กรุณาตรวจว่าได้รัน SQL แล้ว");
+        }
+      });
+
+    const channel = subscribeToPhoneOrderItems(
+      (payload) => {
+        if (!cancelled) setPhoneOrderItems((current) => mergeRealtimePhoneOrder(current, payload));
+      },
+      (status, error) => {
+        if (!cancelled && status !== "SUBSCRIBED" && status !== "CLOSED") {
+          logSupabaseError(`Phone order realtime ${status.toLowerCase()}`, error ?? new Error(status));
+        }
+      },
+    );
+
+    return () => {
+      cancelled = true;
+      void removePhoneOrderSubscription(channel);
     };
   }, []);
 
@@ -623,13 +698,46 @@ export default function Home() {
     }
   }
 
+  async function sendPhoneOrder(item: PhoneOrderItem) {
+    const guardId = item.productMasterId ?? item.id;
+    if (submittingPhoneOrderIdsRef.current.has(guardId) || isClearingAllItems) return false;
+
+    submittingPhoneOrderIdsRef.current.add(guardId);
+    try {
+      if (isSupabaseConfigured) await appendPhoneOrderItem(item);
+      setPhoneOrderItems((current) =>
+        current.some((candidate) => candidate.id === item.id) ? current : [...current, item],
+      );
+      playBeep("ok");
+      return true;
+    } catch (error) {
+      reportSyncError("Supabase append phone order failed", error);
+      return false;
+    } finally {
+      submittingPhoneOrderIdsRef.current.delete(guardId);
+    }
+  }
+
+  async function returnPhoneOrderToCheck(item: PhoneOrderItem) {
+    if (!window.confirm(`นำ “${item.productName}” กลับไปหน้าเช็คสินค้า?`)) return;
+
+    try {
+      if (isSupabaseConfigured) await deletePhoneOrderItem(item.id);
+      setPhoneOrderItems((current) => current.filter((candidate) => candidate.id !== item.id));
+      playBeep("soft");
+    } catch (error) {
+      reportSyncError("Supabase delete phone order failed", error);
+    }
+  }
+
   async function clearToday() {
     if (!requireImportUnlock()) return;
     if (isClearingAllItems || isReplacingAllItems) return;
-    if (!window.confirm("ยืนยันล้างรายการทั้งหมด?\nควรกด Backup วันนี้เป็น CSV ก่อนหากต้องการเก็บข้อมูล\nรายการทั้งหมดใน buy_items จะถูกลบ")) return;
+    if (!window.confirm("ยืนยันล้างรายการทั้งหมด?\nควรกด Backup วันนี้เป็น CSV ก่อนหากต้องการเก็บข้อมูล\nทั้งรายการซื้อวันนี้และรายการโทรสั่งจะถูกลบ")) return;
     playBeep("warn");
     if (!isSupabaseConfigured) {
       setItems([]);
+      setPhoneOrderItems([]);
       setPasteText(sampleData);
       saveLocalFallback([]);
       return;
@@ -639,6 +747,7 @@ export default function Home() {
     try {
       await clearAllItemsAtomic();
       setItems([]);
+      setPhoneOrderItems([]);
       setPasteText(sampleData);
       setDataMode("supabase");
       setSyncError("");
@@ -655,6 +764,7 @@ export default function Home() {
 
     if (!isSupabaseConfigured) {
       setItems([]);
+      setPhoneOrderItems([]);
       setPasteText(sampleData);
       saveLocalFallback([]);
       return true;
@@ -664,6 +774,7 @@ export default function Home() {
     try {
       await clearAllItemsAtomic();
       setItems([]);
+      setPhoneOrderItems([]);
       setPasteText(sampleData);
       setDataMode("supabase");
       setSyncError("");
@@ -908,7 +1019,7 @@ export default function Home() {
             </button>
           </div>
 
-          <nav className="hidden grid-cols-2 gap-2 sm:grid md:grid-cols-3 xl:grid-cols-6">
+          <nav className="hidden grid-cols-2 gap-2 sm:grid md:grid-cols-3 xl:grid-cols-7">
             {tabs.map((tab) => {
               const Icon = tab.icon;
               return (
@@ -947,7 +1058,9 @@ export default function Home() {
           <div className="relative">
             <ProductCheckPage
               currentBuyItems={items}
-              onSend={sendCheckedProducts}
+              currentPhoneOrderItems={phoneOrderItems}
+              onSendWalk={sendCheckedProducts}
+              onSendPhone={sendPhoneOrder}
               onStartNewCycle={startNewWorkingCycle}
               isAdminUnlocked={isImportUnlocked}
               isAdminPinConfigured={isImportPinConfigured}
@@ -1016,6 +1129,10 @@ export default function Home() {
             onBought={openBuyPopup}
             onUnavailable={markUnavailable}
           />
+        )}
+
+        {activeTab === "phone-orders" && (
+          <PhoneOrderPage items={phoneOrderItems} onReturnToCheck={returnPhoneOrderToCheck} />
         )}
 
         {activeTab === "bought" && (
@@ -1482,6 +1599,95 @@ function ImportPinOverlay({
         )}
       </form>
     </div>
+  );
+}
+
+function PhoneOrderPage({
+  items,
+  onReturnToCheck,
+}: {
+  items: PhoneOrderItem[];
+  onReturnToCheck: (item: PhoneOrderItem) => void;
+}) {
+  const [copiedSupplier, setCopiedSupplier] = useState("");
+  const groupedItems = useMemo(() => {
+    const groups = new Map<string, PhoneOrderItem[]>();
+    for (const item of items) {
+      const supplier = item.supplierName.trim();
+      groups.set(supplier, [...(groups.get(supplier) ?? []), item]);
+    }
+    return Array.from(groups.entries()).sort(([left], [right]) => left.localeCompare(right, "th"));
+  }, [items]);
+
+  async function copySupplierOrder(supplier: string, supplierItems: PhoneOrderItem[]) {
+    const text = [
+      "สวัสดีครับ ขอรายการดังนี้",
+      ...supplierItems.map((item) => `${item.productName} ${item.quantity} ${item.unit}`),
+      "ขอบคุณครับ",
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedSupplier(supplier);
+      window.setTimeout(() => setCopiedSupplier((current) => current === supplier ? "" : current), 2_000);
+      playBeep("soft");
+    } catch (error) {
+      logSupabaseError("Clipboard copy failed", error);
+      window.alert("คัดลอกไม่สำเร็จ กรุณาอนุญาตการใช้งานคลิปบอร์ด");
+    }
+  }
+
+  return (
+    <section>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <SummaryCard label="ร้านทั้งหมด" value={groupedItems.length} tone="blue" />
+        <SummaryCard label="รายการโทรสั่งทั้งหมด" value={items.length} tone="mint" />
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        {groupedItems.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-white/15 bg-market-panel/70 p-8 text-center font-black text-emerald-100/70 lg:col-span-2">
+            ยังไม่มีรายการโทรสั่ง
+          </div>
+        ) : groupedItems.map(([supplier, supplierItems]) => (
+          <article key={supplier} className="rounded-lg border border-sky-300/25 bg-sky-300/[0.06] p-3 shadow-touch sm:p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+              <div>
+                <h2 className="text-xl font-black text-white">{supplier}</h2>
+                <p className="text-sm font-bold text-sky-100/65">{supplierItems.length} รายการ</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void copySupplierOrder(supplier, supplierItems)}
+                className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-sky-300/45 bg-sky-300/12 px-3 text-sm font-black text-sky-100"
+              >
+                <Copy className="h-4 w-4" />
+                {copiedSupplier === supplier ? "คัดลอกแล้ว" : "คัดลอกรายการ"}
+              </button>
+            </div>
+
+            <div className="mt-3 grid gap-2">
+              {supplierItems.map((item) => (
+                <div key={item.id} className="grid gap-2 rounded-lg border border-white/10 bg-market-ink/55 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                  <div className="min-w-0">
+                    <p className="font-black text-white">{item.productName}</p>
+                    <p className="mt-0.5 font-bold text-market-mint">{item.quantity} {item.unit}</p>
+                    {item.note && <p className="mt-1 text-xs font-semibold text-emerald-100/55">{item.note}</p>}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onReturnToCheck(item)}
+                    className="min-h-10 rounded-lg border border-market-amber/55 bg-market-amber/10 px-3 text-sm font-black text-amber-100"
+                  >
+                    นำกลับไปเช็ค
+                  </button>
+                </div>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

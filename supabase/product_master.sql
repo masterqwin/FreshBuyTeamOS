@@ -11,11 +11,20 @@ create table if not exists public.product_master (
   default_unit text not null,
   default_max_price text null,
   note text null,
+  purchase_method text not null default 'walk',
+  supplier_name text null,
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint product_master_name_not_blank check (nullif(btrim(name), '') is not null),
   constraint product_master_unit_not_blank check (nullif(btrim(default_unit), '') is not null),
+  constraint product_master_purchase_method_allowed check (purchase_method in ('walk', 'phone')),
+  constraint product_master_phone_supplier_required check (
+    purchase_method <> 'phone' or nullif(btrim(supplier_name), '') is not null
+  ),
+  constraint product_master_walk_supplier_empty check (
+    purchase_method <> 'walk' or supplier_name is null
+  ),
   constraint product_master_category_allowed check (
     category in ('ผักใบ', 'ผักผล', 'ผักเมืองหนาว', 'ผักแพ๊คและเห็ด', 'เครื่องเทศ', 'อื่นๆ')
   )
@@ -82,6 +91,7 @@ end;
 $$;
 
 -- Validation after running:
-select id, name, category, default_unit, default_max_price, note, active, created_at, updated_at
+select id, name, category, default_unit, default_max_price, note, purchase_method, supplier_name,
+       active, created_at, updated_at
 from public.product_master
 order by category, name;

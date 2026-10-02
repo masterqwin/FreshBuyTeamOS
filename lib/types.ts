@@ -37,6 +37,7 @@ export const PRODUCT_UNITS = [
 
 export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number];
 export type ProductUnit = (typeof PRODUCT_UNITS)[number];
+export type PurchaseMethod = "walk" | "phone";
 
 export type ProductMasterItem = {
   id: string;
@@ -45,6 +46,8 @@ export type ProductMasterItem = {
   defaultUnit: ProductUnit;
   defaultMaxPrice: number | "";
   note: string;
+  purchaseMethod: PurchaseMethod;
+  supplierName: string;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -52,8 +55,20 @@ export type ProductMasterItem = {
 
 export type ProductMasterInput = Pick<
   ProductMasterItem,
-  "name" | "category" | "defaultUnit" | "defaultMaxPrice" | "note"
+  "name" | "category" | "defaultUnit" | "defaultMaxPrice" | "note" | "purchaseMethod" | "supplierName"
 >;
+
+export type PhoneOrderItem = {
+  id: string;
+  productMasterId: string | null;
+  productName: string;
+  quantity: string;
+  unit: string;
+  supplierName: string;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type FreshBuyItem = {
   id: string;

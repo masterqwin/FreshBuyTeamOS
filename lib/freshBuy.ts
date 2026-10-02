@@ -2,6 +2,7 @@ import type { BuyerName, FreshBuyItem, ItemStatus, ParsedImportRow } from "./typ
 
 export const STORAGE_KEY = "fresh-buy-team-os-v1";
 export const PRODUCT_MASTER_STORAGE_KEY = "fresh-buy-product-master-v1";
+export const PHONE_ORDER_STORAGE_KEY = "fresh-buy-phone-orders-v1";
 export const BUYERS: BuyerName[] = ["ผู้ซื้อ 1", "ผู้ซื้อ 2", "ผู้ซื้อ 3", "คนเช็คของ"];
 
 export function normalizeProductName(value: string) {
