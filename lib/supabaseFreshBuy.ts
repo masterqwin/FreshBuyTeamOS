@@ -1,4 +1,9 @@
-import { createClient, type RealtimeChannel, type SupabaseClient } from "@supabase/supabase-js";
+import {
+  createClient,
+  type RealtimeChannel,
+  type RealtimePostgresChangesPayload,
+  type SupabaseClient,
+} from "@supabase/supabase-js";
 import type { BuyerName, FreshBuyItem, ItemStatus, VehicleStatus } from "./types";
 
 type BuyItemRow = {
@@ -19,6 +24,18 @@ type BuyItemRow = {
   updated_at: string;
   day_key: string;
 };
+
+type ReplaceAllItemsRpcRow = {
+  success: boolean;
+  inserted_count: number;
+};
+
+type ClearAllItemsRpcRow = {
+  success: boolean;
+  deleted_count: number;
+};
+
+const GLOBAL_LIST_DAY_KEY = "global";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -67,7 +84,7 @@ function toItem(row: BuyItemRow): FreshBuyItem {
   };
 }
 
-function toRow(item: FreshBuyItem, dayKey: string) {
+function toRow(item: FreshBuyItem) {
   return {
     id: item.id,
     name: item.name,
@@ -82,7 +99,7 @@ function toRow(item: FreshBuyItem, dayKey: string) {
     checked_at: item.checkedAt || null,
     issue_note: item.issueNote || null,
     vehicle_status: item.vehicleStatus ?? "unchecked",
-    day_key: dayKey,
+    day_key: GLOBAL_LIST_DAY_KEY,
   };
 }
 
@@ -110,33 +127,53 @@ function requireClient() {
   return supabase;
 }
 
-export async function fetchDayItems(dayKey: string): Promise<FreshBuyItem[]> {
+export async function fetchAllItems(): Promise<FreshBuyItem[]> {
   const client = requireClient();
   const { data, error } = await client
     .from("buy_items")
     .select("*")
-    .eq("day_key", dayKey)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true });
 
   if (error) throw error;
   return ((data ?? []) as BuyItemRow[]).map(toItem);
 }
 
-export async function replaceDayItems(dayKey: string, items: FreshBuyItem[]) {
-  const client = requireClient();
-  const { error: deleteError } = await client.from("buy_items").delete().eq("day_key", dayKey);
-  if (deleteError) throw deleteError;
-  if (items.length === 0) return;
-
-  const { error: insertError } = await client.from("buy_items").insert(items.map((item) => toRow(item, dayKey)));
-  if (insertError) throw insertError;
+export async function replaceAllItems(items: FreshBuyItem[]) {
+  return replaceAllItemsAtomic(items);
 }
 
-export async function appendDayItems(dayKey: string, items: FreshBuyItem[]) {
+export async function replaceAllItemsAtomic(items: FreshBuyItem[]) {
+  const client = requireClient();
+  const { data, error } = await client.rpc("freshbuy_replace_all_items", { items: items.map(toRow) });
+  if (error) throw error;
+
+  const result = (data?.[0] ?? null) as ReplaceAllItemsRpcRow | null;
+  if (!result?.success || result.inserted_count !== items.length) {
+    throw new Error(`Atomic replace inserted ${result?.inserted_count ?? "unknown"} of ${items.length} items`);
+  }
+}
+
+export async function clearAllItems() {
+  return clearAllItemsAtomic();
+}
+
+export async function appendItems(items: FreshBuyItem[]) {
   if (items.length === 0) return;
   const client = requireClient();
-  const { error } = await client.from("buy_items").insert(items.map((item) => toRow(item, dayKey)));
+  const { error } = await client.from("buy_items").insert(items.map(toRow));
   if (error) throw error;
+}
+
+export async function clearAllItemsAtomic() {
+  const client = requireClient();
+  const { data, error } = await client.rpc("freshbuy_clear_all_items");
+  if (error) throw error;
+
+  const result = (data?.[0] ?? null) as ClearAllItemsRpcRow | null;
+  if (!result?.success) {
+    throw new Error("Atomic clear failed");
+  }
 }
 
 export async function updateDayItem(id: string, patch: Partial<FreshBuyItem>) {
@@ -145,26 +182,31 @@ export async function updateDayItem(id: string, patch: Partial<FreshBuyItem>) {
   if (error) throw error;
 }
 
-export async function clearDayItems(dayKey: string) {
-  const client = requireClient();
-  const { error } = await client.from("buy_items").delete().eq("day_key", dayKey);
-  if (error) throw error;
+export type ItemRealtimePayload = RealtimePostgresChangesPayload<BuyItemRow>;
+export type ItemRealtimeStatus = "SUBSCRIBED" | "TIMED_OUT" | "CLOSED" | "CHANNEL_ERROR";
+
+export function itemFromRealtimeRow(row: BuyItemRow | Record<string, unknown>): FreshBuyItem {
+  return toItem(row as BuyItemRow);
 }
 
-export function subscribeToDayItems(dayKey: string, onChange: () => void): RealtimeChannel | null {
+export function subscribeToItems(
+  onChange: (payload: ItemRealtimePayload) => void,
+  onStatus?: (status: ItemRealtimeStatus, error?: Error) => void,
+): RealtimeChannel | null {
   if (!supabase) return null;
 
   return supabase
-    .channel(`buy_items:${dayKey}`)
+    .channel("buy_items:global")
     .on(
       "postgres_changes",
       {
         event: "*",
         schema: "public",
         table: "buy_items",
-        filter: `day_key=eq.${dayKey}`,
       },
       onChange,
     )
-    .subscribe();
+    .subscribe((status, error) => {
+      onStatus?.(status as ItemRealtimeStatus, error);
+    });
 }

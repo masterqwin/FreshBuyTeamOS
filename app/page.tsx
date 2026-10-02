@@ -9,46 +9,69 @@ import {
   RotateCcw,
   ShoppingBasket,
   Truck,
-  Upload,
   UserRoundCheck,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ProductCheckPage from "@/app/ProductCheckPage";
 import {
   BUYERS,
   STATUS_LABELS,
   STATUS_STYLES,
+  PRODUCT_MASTER_STORAGE_KEY,
   STORAGE_KEY,
   formatDisplayTime,
   getSummary,
   nowIsoStamp,
   nowStamp,
+  normalizeProductName,
   parseImportText,
   playBeep,
   rowsToItems,
 } from "@/lib/freshBuy";
 import {
-  appendDayItems,
-  clearDayItems,
-  fetchDayItems,
+  appendItems,
+  clearAllItemsAtomic,
+  fetchAllItems,
   getTodayDayKey,
   isSupabaseConfigured,
-  replaceDayItems,
-  subscribeToDayItems,
+  itemFromRealtimeRow,
+  replaceAllItemsAtomic,
+  subscribeToItems,
   updateDayItem,
+  type ItemRealtimePayload,
+  type ItemRealtimeStatus,
 } from "@/lib/supabaseFreshBuy";
-import type { BuyerName, FreshBuyItem, ItemStatus, VehicleStatus } from "@/lib/types";
+import {
+  fetchAllProducts,
+  removeProductMasterSubscription,
+  subscribeToProductMaster,
+} from "@/lib/supabaseProductMaster";
+import {
+  PRODUCT_CATEGORIES,
+  type BuyerName,
+  type FreshBuyItem,
+  type ItemStatus,
+  type ProductCategory,
+  type ProductMasterItem,
+  type VehicleStatus,
+} from "@/lib/types";
 
-type TabId = "import" | "pending" | "bought" | "unavailable" | "check" | "history";
+type TabId = "products" | "pending" | "bought" | "unavailable" | "check" | "history";
 type PriceModalMode = "buy" | "edit";
 type BoughtFilter = "bought" | "loaded" | "incomplete" | "unchecked";
+type PendingCategoryFilter = "ทั้งหมด" | ProductCategory;
+type DataMode = "connecting" | "supabase" | "offline-cache" | "error";
+type RealtimeStatus = "connecting" | "connected" | "offline" | "error";
 type PriceModalState = {
   item: FreshBuyItem;
   mode: PriceModalMode;
 } | null;
 
+const IMPORT_UNLOCK_STORAGE_KEY = "fresh-buy-import-unlocked-v1";
+
 const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
-  { id: "import", label: "นำเข้ารายการ", icon: Upload },
-  { id: "pending", label: "ต้องซื้อวันนี้", icon: ShoppingBasket },
+  { id: "products", label: "เช็คสินค้า", icon: ClipboardList },
+  { id: "pending", label: "รายการซื้อวันนี้", icon: ShoppingBasket },
   { id: "bought", label: "ซื้อแล้ว", icon: Check },
   { id: "unavailable", label: "ไม่มีของ", icon: PackageX },
   { id: "check", label: "เช็คขึ้นรถ", icon: Truck },
@@ -56,52 +79,6 @@ const tabs: { id: TabId; label: string; icon: React.ElementType }[] = [
 ];
 
 const historyStatuses: ItemStatus[] = ["pending", "bought", "checked", "unavailable", "missing", "cancelled"];
-const THAI_LETTERS = [
-  "ก",
-  "ข",
-  "ค",
-  "ฆ",
-  "ง",
-  "จ",
-  "ฉ",
-  "ช",
-  "ซ",
-  "ฌ",
-  "ญ",
-  "ฎ",
-  "ฏ",
-  "ฐ",
-  "ฑ",
-  "ฒ",
-  "ณ",
-  "ด",
-  "ต",
-  "ถ",
-  "ท",
-  "ธ",
-  "น",
-  "บ",
-  "ป",
-  "ผ",
-  "ฝ",
-  "พ",
-  "ฟ",
-  "ภ",
-  "ม",
-  "ย",
-  "ร",
-  "ล",
-  "ว",
-  "ศ",
-  "ษ",
-  "ส",
-  "ห",
-  "ฬ",
-  "อ",
-  "ฮ",
-];
-const THAI_LEADING_VOWELS = new Set(["เ", "แ", "โ", "ใ", "ไ"]);
-const THAI_CONSONANTS = new Set(THAI_LETTERS);
 const VEHICLE_STATUS_LABELS: Record<VehicleStatus, string> = {
   unchecked: "ยังไม่ได้เช็คขึ้นรถ",
   loaded: "ครบ",
@@ -122,10 +99,52 @@ function getVehicleStatus(item: FreshBuyItem): VehicleStatus {
   return item.vehicleStatus ?? "unchecked";
 }
 
+function getHistoryStatus(item: FreshBuyItem): ItemStatus {
+  const vehicleStatus = getVehicleStatus(item);
+  if (vehicleStatus === "incomplete") return "missing";
+  if (vehicleStatus === "loaded") return "checked";
+  if (item.status === "missing") return "missing";
+  if (item.status === "checked") return "checked";
+  return item.status;
+}
+
 function getActualPriceNumber(item: FreshBuyItem): number {
   if (item.actualPrice === "" || String(item.actualPrice).trim() === "-") return 0;
   const price = Number(item.actualPrice);
   return Number.isFinite(price) ? price : 0;
+}
+
+function getDatePart(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTypes) {
+  return parts.find((part) => part.type === type)?.value ?? "";
+}
+
+function formatThailandDateTime(date: Date) {
+  const parts = new Intl.DateTimeFormat("th-TH-u-ca-buddhist-nu-latn", {
+    timeZone: "Asia/Bangkok",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  return `${getDatePart(parts, "day")}/${getDatePart(parts, "month")}/${getDatePart(parts, "year")} ${getDatePart(parts, "hour")}:${getDatePart(parts, "minute")}`;
+}
+
+function formatPurchaseTimeOnly(value: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  const parts = new Intl.DateTimeFormat("th-TH-u-nu-latn", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  return `${getDatePart(parts, "hour")}:${getDatePart(parts, "minute")}`;
 }
 
 function escapeCsvValue(value: string | number) {
@@ -163,18 +182,50 @@ function buildDailyBackupCsv(items: FreshBuyItem[], dayKey: string) {
   return `\uFEFF${[headers, ...rows].map((row) => row.map(escapeCsvValue).join(",")).join("\r\n")}`;
 }
 
-function getThaiInitialKey(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return "";
-
-  const chars = Array.from(trimmed);
-  const startIndex = THAI_LEADING_VOWELS.has(chars[0]) ? 1 : 0;
-  for (let index = startIndex; index < chars.length; index += 1) {
-    const char = chars[index];
-    if (THAI_CONSONANTS.has(char)) return char;
+function mergeRealtimeItem(items: FreshBuyItem[], payload: ItemRealtimePayload) {
+  if (payload.eventType === "DELETE") {
+    const deletedId = (payload.old as { id?: string }).id;
+    if (!deletedId) return items;
+    return items.filter((item) => item.id !== deletedId);
   }
 
-  return "";
+  const nextItem = itemFromRealtimeRow(payload.new);
+  const existingIndex = items.findIndex((item) => item.id === nextItem.id);
+
+  if (existingIndex === -1) {
+    return [...items, nextItem];
+  }
+
+  return items.map((item, index) => (index === existingIndex ? nextItem : item));
+}
+
+function formatSyncClock(date: Date) {
+  const parts = new Intl.DateTimeFormat("th-TH-u-nu-latn", {
+    timeZone: "Asia/Bangkok",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  return `${getDatePart(parts, "hour")}:${getDatePart(parts, "minute")}:${getDatePart(parts, "second")}`;
+}
+
+function getErrorField(error: unknown, key: string) {
+  if (!error || typeof error !== "object" || !(key in error)) return undefined;
+  const value = (error as Record<string, unknown>)[key];
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
+
+function logSupabaseError(context: string, error: unknown) {
+  console.error(context, {
+    name: error instanceof Error ? error.name : undefined,
+    code: getErrorField(error, "code"),
+    message: error instanceof Error ? error.message : getErrorField(error, "message") ?? String(error),
+    details: getErrorField(error, "details"),
+    hint: getErrorField(error, "hint"),
+    status: getErrorField(error, "status") ?? getErrorField(error, "statusCode"),
+  });
 }
 
 const sampleData = `ผักกาดขาว\t5\tกก.\t25\tเอาสวย ไม่ช้ำ
@@ -182,7 +233,7 @@ const sampleData = `ผักกาดขาว\t5\tกก.\t25\tเอาสว
 พริกแดง\t2\tกก.\t90`;
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<TabId>("import");
+  const [activeTab, setActiveTab] = useState<TabId>("products");
   const [activeBuyer, setActiveBuyer] = useState<BuyerName>("ผู้ซื้อ 1");
   const [items, setItems] = useState<FreshBuyItem[]>([]);
   const [pasteText, setPasteText] = useState(sampleData);
@@ -190,14 +241,68 @@ export default function Home() {
   const [priceModal, setPriceModal] = useState<PriceModalState>(null);
   const [buyPrice, setBuyPrice] = useState("");
   const [boughtFilter, setBoughtFilter] = useState<BoughtFilter>("bought");
-  const [pendingLetterFilter, setPendingLetterFilter] = useState<string | null>(null);
+  const [pendingCategoryFilter, setPendingCategoryFilter] = useState<PendingCategoryFilter>("ทั้งหมด");
+  const [productCategoryByName, setProductCategoryByName] = useState<Record<string, ProductCategory>>({});
   const [isBackupConfirmOpen, setIsBackupConfirmOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const dayKey = useMemo(() => getTodayDayKey(), []);
+  const [currentDateTime, setCurrentDateTime] = useState("");
+  const [dataMode, setDataMode] = useState<DataMode>(isSupabaseConfigured ? "connecting" : "offline-cache");
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>(isSupabaseConfigured ? "connecting" : "offline");
+  const [syncError, setSyncError] = useState("");
+  const [lastSyncAt, setLastSyncAt] = useState("");
+  const [savingItemIds, setSavingItemIds] = useState<string[]>([]);
+  const [isReplacingAllItems, setIsReplacingAllItems] = useState(false);
+  const [isClearingAllItems, setIsClearingAllItems] = useState(false);
+  const savingItemIdsRef = useRef<Set<string>>(new Set());
+  const submittingProductListRef = useRef(false);
+  const [isImportUnlocked, setIsImportUnlocked] = useState(false);
+  const [isImportPinConfigured, setIsImportPinConfigured] = useState<boolean | null>(null);
+  const [isAdminPinOpen, setIsAdminPinOpen] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [isPinChecking, setIsPinChecking] = useState(false);
+
+  useEffect(() => {
+    const refreshClock = () => setCurrentDateTime(formatThailandDateTime(new Date()));
+    refreshClock();
+    const intervalId = window.setInterval(refreshClock, 60_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function verifyImportPinConfig() {
+      try {
+        const response = await fetch("/api/import-pin", { method: "GET" });
+        const result = (await response.json()) as { configured?: boolean };
+        if (!cancelled) {
+          const configured = Boolean(result.configured);
+          setIsImportPinConfigured(configured);
+          setIsImportUnlocked(
+            configured && window.localStorage.getItem(IMPORT_UNLOCK_STORAGE_KEY) === "unlocked",
+          );
+          if (!configured) setPinError("ยังไม่ได้ตั้งค่า IMPORT_PAGE_PIN");
+        }
+      } catch {
+        if (!cancelled) {
+          setIsImportPinConfigured(false);
+          setIsImportUnlocked(false);
+          setPinError("ไม่สามารถตรวจสอบการตั้งค่า PIN ได้");
+        }
+      }
+    }
+
+    void verifyImportPinConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (isSupabaseConfigured) return;
 
+    setDataMode("offline-cache");
+    setRealtimeStatus("offline");
     const saved = window.localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
@@ -220,117 +325,402 @@ export default function Home() {
 
     let cancelled = false;
 
-    async function refreshItems() {
+    async function loadGlobalItems() {
+      setDataMode("connecting");
+      setRealtimeStatus("connecting");
       try {
-        const remoteItems = await fetchDayItems(dayKey);
+        const remoteItems = await fetchAllItems();
         if (!cancelled) {
           setItems(remoteItems);
+          setDataMode("supabase");
+          setSyncError("");
+          setLastSyncAt(formatSyncClock(new Date()));
           setHydrated(true);
         }
       } catch (error) {
-        console.error("Supabase load failed, using localStorage fallback", error);
-        const saved = window.localStorage.getItem(STORAGE_KEY);
-        if (saved && !cancelled) {
-          try {
-            setItems(JSON.parse(saved) as FreshBuyItem[]);
-          } catch {
-            setItems([]);
-          }
+        logSupabaseError("Supabase load failed", error);
+        if (!cancelled) {
+          setDataMode("error");
+          setSyncError("การเชื่อมต่อข้อมูลกลางมีปัญหา");
+          setHydrated(true);
         }
-        if (!cancelled) setHydrated(true);
       }
     }
 
-    void refreshItems();
-    const channel = subscribeToDayItems(dayKey, () => {
-      void refreshItems();
-    });
+    void loadGlobalItems();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    function applyProductCategories(products: ProductMasterItem[]) {
+      if (cancelled) return;
+      const lookup: Record<string, ProductCategory> = {};
+      for (const product of products.filter((candidate) => !candidate.active)) {
+        lookup[normalizeProductName(product.name)] = product.category;
+      }
+      for (const product of products.filter((candidate) => candidate.active)) {
+        lookup[normalizeProductName(product.name)] = product.category;
+      }
+      setProductCategoryByName(lookup);
+    }
+
+    async function refreshProductCategories() {
+      try {
+        if (!isSupabaseConfigured) {
+          const saved = window.localStorage.getItem(PRODUCT_MASTER_STORAGE_KEY);
+          applyProductCategories(saved ? (JSON.parse(saved) as ProductMasterItem[]) : []);
+          return;
+        }
+        applyProductCategories(await fetchAllProducts());
+      } catch (error) {
+        logSupabaseError("Product Master category mapping load failed", error);
+      }
+    }
+
+    void refreshProductCategories();
+    const channel = isSupabaseConfigured
+      ? subscribeToProductMaster(() => void refreshProductCategories())
+      : null;
+
+    return () => {
+      cancelled = true;
+      void removeProductMasterSubscription(channel);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    setRealtimeStatus("connecting");
+    let cancelled = false;
+    const channel = subscribeToItems(
+      (payload) => {
+        if (cancelled) return;
+        setItems((current) => mergeRealtimeItem(current, payload));
+        setDataMode("supabase");
+        setRealtimeStatus("connected");
+        setSyncError("");
+        setLastSyncAt(formatSyncClock(new Date()));
+      },
+      (status: ItemRealtimeStatus, error) => {
+        if (cancelled) return;
+
+        if (status === "SUBSCRIBED") {
+          setRealtimeStatus("connected");
+          setSyncError((current) => (current === "การเชื่อมต่อ Realtime มีปัญหา" ? "" : current));
+          return;
+        }
+
+        if (status === "CLOSED") {
+          setRealtimeStatus("offline");
+          return;
+        }
+
+        setRealtimeStatus("error");
+        setSyncError("การเชื่อมต่อ Realtime มีปัญหา");
+        logSupabaseError(`Supabase realtime ${status.toLowerCase()}`, error ?? new Error(status));
+      },
+    );
 
     return () => {
       cancelled = true;
       if (channel) void channel.unsubscribe();
     };
-  }, [dayKey]);
+  }, []);
 
   const parsedRows = useMemo(() => parseImportText(pasteText), [pasteText]);
   const summary = useMemo(() => getSummary(items), [items]);
   const pendingItems = items.filter((item) => item.status === "pending");
-  const filteredPendingItems = pendingLetterFilter
-    ? pendingItems.filter((item) => getThaiInitialKey(item.name) === pendingLetterFilter)
-    : pendingItems;
+  const filteredPendingItems = pendingItems.filter((item) => {
+    if (pendingCategoryFilter === "ทั้งหมด") return true;
+    const category = productCategoryByName[normalizeProductName(item.name)] ?? "อื่นๆ";
+    return category === pendingCategoryFilter;
+  });
   const boughtItems = items.filter((item) => item.status === "bought");
   const unavailableItems = items.filter((item) => item.status === "unavailable");
   const vehicleQueueItems = boughtItems.filter((item) => getVehicleStatus(item) === "unchecked");
   const checkedTotal = boughtItems.filter((item) => getVehicleStatus(item) !== "unchecked").length;
   const boughtTotalForProgress = boughtItems.length;
   const activeTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "";
-
   function saveLocalFallback(nextItems: FreshBuyItem[]) {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextItems));
   }
 
-  async function replaceTodayList() {
-    const nextItems = rowsToItems(parsedRows);
-    setItems(nextItems);
-    setActiveTab("pending");
-    playBeep("ok");
-    if (!isSupabaseConfigured) return;
+  function requireImportUnlock() {
+    if (isImportUnlocked) return true;
+    setPinError("กรุณาปลดล็อกหน้าสำหรับเจ้าของก่อน");
+    playBeep("warn");
+    return false;
+  }
 
+  function setItemSaving(id: string, isSaving: boolean) {
+    const nextSavingIds = new Set(savingItemIdsRef.current);
+    if (isSaving) {
+      nextSavingIds.add(id);
+    } else {
+      nextSavingIds.delete(id);
+    }
+    savingItemIdsRef.current = nextSavingIds;
+    setSavingItemIds(Array.from(nextSavingIds));
+  }
+
+  function reportSyncError(context: string, error: unknown) {
+    logSupabaseError(context, error);
+    setDataMode("error");
+    setSyncError("การบันทึกข้อมูลกลางไม่สำเร็จ");
+    playBeep("warn");
+  }
+
+  async function verifyImportPin() {
+    const pin = pinInput.trim();
+    if (!pin) {
+      setPinError("กรุณาใส่รหัส");
+      playBeep("warn");
+      return;
+    }
+
+    setIsPinChecking(true);
+    setPinError("");
     try {
-      await replaceDayItems(dayKey, nextItems);
-    } catch (error) {
-      console.error("Supabase replace failed", error);
+      const response = await fetch("/api/import-pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      const result = (await response.json()) as { ok?: boolean; configured?: boolean };
+
+      if (!result.configured) {
+        setIsImportPinConfigured(false);
+        setIsImportUnlocked(false);
+        window.localStorage.removeItem(IMPORT_UNLOCK_STORAGE_KEY);
+        setPinError("ยังไม่ได้ตั้งค่า IMPORT_PAGE_PIN");
+        playBeep("warn");
+        return;
+      }
+
+      if (!response.ok || !result.ok) {
+        setPinError("รหัสไม่ถูกต้อง");
+        playBeep("warn");
+        return;
+      }
+
+      window.localStorage.setItem(IMPORT_UNLOCK_STORAGE_KEY, "unlocked");
+      setIsImportPinConfigured(true);
+      setIsImportUnlocked(true);
+      setIsAdminPinOpen(false);
+      setPinInput("");
+      setPinError("");
+      playBeep("ok");
+    } catch {
+      setPinError("ไม่สามารถตรวจสอบรหัสได้");
+      playBeep("warn");
+    } finally {
+      setIsPinChecking(false);
+    }
+  }
+
+  function logoutImportOwner() {
+    window.localStorage.removeItem(IMPORT_UNLOCK_STORAGE_KEY);
+    setIsImportUnlocked(false);
+    setPinInput("");
+    setPinError("");
+    setIsAdminPinOpen(false);
+    playBeep("soft");
+  }
+
+  async function replaceTodayList() {
+    if (!requireImportUnlock()) return;
+    if (isReplacingAllItems || isClearingAllItems) return;
+    if (!window.confirm("ยืนยันสร้างรายการซื้อใหม่?\nรายการซื้อกลางทั้งหมดใน buy_items จะถูกแทนที่ด้วยรายการที่นำเข้า")) return;
+    const nextItems = rowsToItems(parsedRows);
+    if (!isSupabaseConfigured) {
+      setItems(nextItems);
+      setActiveTab("pending");
+      playBeep("ok");
       saveLocalFallback(nextItems);
+      return;
+    }
+
+    setIsReplacingAllItems(true);
+    try {
+      await replaceAllItemsAtomic(nextItems);
+      const remoteItems = await fetchAllItems();
+      setItems(remoteItems);
+      setActiveTab("pending");
+      playBeep("ok");
+      setDataMode("supabase");
+      setSyncError("");
+      setLastSyncAt(formatSyncClock(new Date()));
+    } catch (error) {
+      reportSyncError("Supabase replace global list failed", error);
+    } finally {
+      setIsReplacingAllItems(false);
     }
   }
 
   async function appendTodayList() {
+    if (!requireImportUnlock()) return;
+    if (isReplacingAllItems || isClearingAllItems) return;
     const newItems = rowsToItems(parsedRows);
     const nextItems = [...items, ...newItems];
-    setItems(nextItems);
-    setActiveTab("pending");
-    playBeep("ok");
-    if (!isSupabaseConfigured) return;
+    if (!isSupabaseConfigured) {
+      setItems(nextItems);
+      setActiveTab("pending");
+      playBeep("ok");
+      saveLocalFallback(nextItems);
+      return;
+    }
 
     try {
-      await appendDayItems(dayKey, newItems);
+      await appendItems(newItems);
+      setItems((current) => {
+        const currentIds = new Set(current.map((item) => item.id));
+        return [...current, ...newItems.filter((item) => !currentIds.has(item.id))];
+      });
+      setActiveTab("pending");
+      playBeep("ok");
+      setDataMode("supabase");
+      setSyncError("");
+      setLastSyncAt(formatSyncClock(new Date()));
     } catch (error) {
-      console.error("Supabase append failed", error);
-      saveLocalFallback(nextItems);
+      reportSyncError("Supabase append global list failed", error);
+    }
+  }
+
+  async function sendCheckedProducts(newItems: FreshBuyItem[]) {
+    if (submittingProductListRef.current || isReplacingAllItems || isClearingAllItems) return false;
+    if (newItems.length === 0) return false;
+
+    submittingProductListRef.current = true;
+    const nextItems = [...items, ...newItems];
+    try {
+      if (!isSupabaseConfigured) {
+        setItems(nextItems);
+        saveLocalFallback(nextItems);
+      } else {
+        await appendItems(newItems);
+        setItems((current) => {
+          const currentIds = new Set(current.map((item) => item.id));
+          return [...current, ...newItems.filter((item) => !currentIds.has(item.id))];
+        });
+        setDataMode("supabase");
+        setSyncError("");
+        setLastSyncAt(formatSyncClock(new Date()));
+      }
+
+      playBeep("ok");
+      return true;
+    } catch (error) {
+      reportSyncError("Supabase append checked products failed", error);
+      return false;
+    } finally {
+      submittingProductListRef.current = false;
     }
   }
 
   async function clearToday() {
-    if (!window.confirm("ยืนยันการล้างข้อมูลวันนี้?\nข้อมูลรายการซื้อวันนี้ทั้งหมดจะถูกลบ")) return;
-    setItems([]);
-    setPasteText(sampleData);
+    if (!requireImportUnlock()) return;
+    if (isClearingAllItems || isReplacingAllItems) return;
+    if (!window.confirm("ยืนยันล้างรายการทั้งหมด?\nควรกด Backup วันนี้เป็น CSV ก่อนหากต้องการเก็บข้อมูล\nรายการทั้งหมดใน buy_items จะถูกลบ")) return;
     playBeep("warn");
-    if (!isSupabaseConfigured) return;
-
-    try {
-      await clearDayItems(dayKey);
-    } catch (error) {
-      console.error("Supabase clear failed", error);
+    if (!isSupabaseConfigured) {
+      setItems([]);
+      setPasteText(sampleData);
       saveLocalFallback([]);
+      return;
+    }
+
+    setIsClearingAllItems(true);
+    try {
+      await clearAllItemsAtomic();
+      setItems([]);
+      setPasteText(sampleData);
+      setDataMode("supabase");
+      setSyncError("");
+      setLastSyncAt(formatSyncClock(new Date()));
+    } catch (error) {
+      reportSyncError("Supabase clear global list failed", error);
+    } finally {
+      setIsClearingAllItems(false);
+    }
+  }
+
+  async function startNewWorkingCycle() {
+    if (isClearingAllItems || isReplacingAllItems) return false;
+
+    if (!isSupabaseConfigured) {
+      setItems([]);
+      setPasteText(sampleData);
+      saveLocalFallback([]);
+      return true;
+    }
+
+    setIsClearingAllItems(true);
+    try {
+      await clearAllItemsAtomic();
+      setItems([]);
+      setPasteText(sampleData);
+      setDataMode("supabase");
+      setSyncError("");
+      setLastSyncAt(formatSyncClock(new Date()));
+      return true;
+    } catch (error) {
+      reportSyncError("Supabase start new global working cycle failed", error);
+      return false;
+    } finally {
+      setIsClearingAllItems(false);
     }
   }
 
   function updateItem(id: string, patch: Partial<FreshBuyItem>) {
-    setItems((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
-    if (!isSupabaseConfigured) return;
+    if (savingItemIdsRef.current.has(id)) return;
 
-    void updateDayItem(id, patch).catch((error) => {
-      console.error("Supabase update failed", error);
-    });
+    let previousItem: FreshBuyItem | undefined;
+    setItemSaving(id, true);
+    setItems((current) =>
+      current.map((item) => {
+        if (item.id !== id) return item;
+        previousItem = item;
+        return { ...item, ...patch };
+      }),
+    );
+
+    if (!isSupabaseConfigured) {
+      setItemSaving(id, false);
+      return;
+    }
+
+    void updateDayItem(id, patch)
+      .then(() => {
+        setDataMode("supabase");
+        setSyncError("");
+        setLastSyncAt(formatSyncClock(new Date()));
+      })
+      .catch((error) => {
+        if (previousItem) {
+          setItems((current) => current.map((item) => (item.id === id ? previousItem as FreshBuyItem : item)));
+        }
+        reportSyncError("Supabase update item failed", error);
+      })
+      .finally(() => {
+        setItemSaving(id, false);
+      });
   }
 
   function confirmBackupCsv() {
-    const csv = buildDailyBackupCsv(items, dayKey);
+    if (!requireImportUnlock()) return;
+    const workingDayKey = getTodayDayKey();
+    const csv = buildDailyBackupCsv(items, workingDayKey);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `freshbuy_${dayKey}.csv`;
+    link.download = `freshbuy_${workingDayKey}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -427,7 +817,7 @@ export default function Home() {
   }
 
   function groupedByStatus(status: ItemStatus) {
-    return items.filter((item) => item.status === status);
+    return items.filter((item) => getHistoryStatus(item) === status);
   }
 
   return (
@@ -467,6 +857,14 @@ export default function Home() {
               ))}
             </div>
           </div>
+
+          <SyncStatusBar
+            dataMode={dataMode}
+            realtimeStatus={realtimeStatus}
+            lastSyncAt={lastSyncAt}
+            syncError={syncError}
+            savingCount={savingItemIds.length}
+          />
 
           <div className="rounded-lg border border-white/10 bg-market-panel/82 p-1.5 shadow-touch sm:hidden">
             <nav
@@ -540,30 +938,80 @@ export default function Home() {
         <SummaryCard label="ต้องซื้อทั้งหมด" value={summary.total} tone="mint" />
         <SummaryCard label="รอซื้อ" value={summary.pending} tone="blue" />
         <SummaryCard label="ซื้อแล้ว" value={summary.bought} tone="green" />
-        <SummaryCard label="เช็คครบ" value={summary.checked} tone="mint" />
         <SummaryCard label="ไม่มีของ" value={summary.unavailable} tone="red" />
+        <SummaryCard label="วันที่ / เวลา" value={currentDateTime || "-"} tone="mint" />
       </section>
 
       <section className="no-print mx-auto max-w-7xl px-3 py-3 sm:px-4 sm:py-5 lg:px-6">
-        {activeTab === "import" && (
-          <ImportPage
-            pasteText={pasteText}
-            parsedCount={parsedRows.length}
-            items={parsedRows}
-            onTextChange={setPasteText}
-            onCreate={replaceTodayList}
-            onAppend={appendTodayList}
-            onBackup={() => setIsBackupConfirmOpen(true)}
-            onClear={clearToday}
-          />
+        {activeTab === "products" && (
+          <div className="relative">
+            <ProductCheckPage
+              currentBuyItems={items}
+              onSend={sendCheckedProducts}
+              onStartNewCycle={startNewWorkingCycle}
+              isAdminUnlocked={isImportUnlocked}
+              isAdminPinConfigured={isImportPinConfigured}
+              onRequestAdmin={() => {
+                setPinError("");
+                setIsAdminPinOpen(true);
+              }}
+              onLogout={logoutImportOwner}
+              onBackup={() => setIsBackupConfirmOpen(true)}
+              onClearToday={clearToday}
+              isClearingToday={isClearingAllItems}
+            />
+
+            {isImportUnlocked && (
+              <details className="mt-4 rounded-lg border border-white/10 bg-market-panel/65 p-3">
+                <summary className="cursor-pointer font-black text-emerald-100/75">
+                  เครื่องมือเดิม: นำเข้าจาก Excel / Google Sheet
+                </summary>
+                <div className="mt-4">
+                  <ImportPage
+                    pasteText={pasteText}
+                    parsedCount={parsedRows.length}
+                    items={parsedRows}
+                    locked={false}
+                    pinValue={pinInput}
+                    pinError={pinError}
+                    isPinChecking={isPinChecking}
+                    onPinChange={setPinInput}
+                    onUnlock={verifyImportPin}
+                    onLogout={logoutImportOwner}
+                    onTextChange={setPasteText}
+                    onCreate={replaceTodayList}
+                    onAppend={appendTodayList}
+                    onBackup={() => setIsBackupConfirmOpen(true)}
+                    onClear={clearToday}
+                    isReplacing={isReplacingAllItems}
+                    isClearing={isClearingAllItems}
+                  />
+                </div>
+              </details>
+            )}
+
+            {isAdminPinOpen && !isImportUnlocked && (
+              <ImportPinOverlay
+                pinValue={pinInput}
+                pinError={pinError}
+                isChecking={isPinChecking}
+                onPinChange={(value) => {
+                  setPinInput(value);
+                  if (pinError) setPinError("");
+                }}
+                onUnlock={verifyImportPin}
+                onClose={() => setIsAdminPinOpen(false)}
+              />
+            )}
+          </div>
         )}
 
         {activeTab === "pending" && (
           <PendingPage
             items={filteredPendingItems}
             totalItems={pendingItems.length}
-            selectedLetter={pendingLetterFilter}
-            onLetterChange={setPendingLetterFilter}
+            selectedCategory={pendingCategoryFilter}
+            onCategoryChange={setPendingCategoryFilter}
             activeBuyer={activeBuyer}
             onBought={openBuyPopup}
             onUnavailable={markUnavailable}
@@ -653,18 +1101,66 @@ export default function Home() {
   );
 }
 
-function SummaryCard({ label, value, tone }: { label: string; value: number; tone: "mint" | "blue" | "green" | "red" }) {
+function SyncStatusBar({
+  dataMode,
+  realtimeStatus,
+  lastSyncAt,
+  syncError,
+  savingCount,
+}: {
+  dataMode: DataMode;
+  realtimeStatus: RealtimeStatus;
+  lastSyncAt: string;
+  syncError: string;
+  savingCount: number;
+}) {
+  const modeLabel: Record<DataMode, string> = {
+    connecting: "Connecting",
+    supabase: "Supabase",
+    "offline-cache": "Offline cache",
+    error: "Error",
+  };
+  const realtimeLabel: Record<RealtimeStatus, string> = {
+    connecting: "Connecting",
+    connected: "Connected",
+    offline: "Offline",
+    error: "Error",
+  };
+  const isError = dataMode === "error" || realtimeStatus === "error";
+
+  return (
+    <div
+      className={`flex flex-wrap items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-bold sm:text-xs ${
+        isError
+          ? "border-market-red/50 bg-market-red/12 text-red-100"
+          : "border-market-mint/30 bg-white/5 text-emerald-50/88"
+      }`}
+    >
+      <span>Mode: {modeLabel[dataMode]}</span>
+      <span>Realtime: {realtimeLabel[realtimeStatus]}</span>
+      <span>Sync: {lastSyncAt || "-"}</span>
+      {savingCount > 0 && <span>Saving: {savingCount}</span>}
+      {syncError && <span className="text-red-100">{syncError}</span>}
+    </div>
+  );
+}
+
+function SummaryCard({ label, value, tone }: { label: string; value: number | string; tone: "mint" | "blue" | "green" | "red" }) {
   const toneClass = {
     mint: "text-market-mint",
     blue: "text-market-blue",
     green: "text-market-green",
     red: "text-market-red",
   }[tone];
+  const valueClass =
+    typeof value === "string"
+      ? "whitespace-nowrap text-lg leading-tight sm:text-xl lg:text-2xl"
+      : "text-2xl sm:text-3xl";
 
   return (
     <div className="rounded-lg border border-white/10 bg-market-panel/88 p-3 shadow-touch sm:p-4">
       <p className="text-xs font-bold text-emerald-100/62">{label}</p>
-      <p className={`mt-1 text-2xl font-black sm:mt-2 sm:text-3xl ${toneClass}`}>{value}</p>
+      <p className={`mt-1 font-black sm:mt-2 ${valueClass} ${toneClass}`}>{value}</p>
     </div>
   );
 }
@@ -785,23 +1281,47 @@ function ImportPage({
   pasteText,
   parsedCount,
   items,
+  locked,
+  pinValue,
+  pinError,
+  isPinChecking,
+  onPinChange,
+  onUnlock,
+  onLogout,
   onTextChange,
   onCreate,
   onAppend,
   onBackup,
   onClear,
+  isReplacing,
+  isClearing,
 }: {
   pasteText: string;
   parsedCount: number;
   items: ReturnType<typeof parseImportText>;
+  locked: boolean;
+  pinValue: string;
+  pinError: string;
+  isPinChecking: boolean;
+  onPinChange: (value: string) => void;
+  onUnlock: () => void;
+  onLogout: () => void;
   onTextChange: (value: string) => void;
   onCreate: () => void;
   onAppend: () => void;
   onBackup: () => void;
   onClear: () => void;
+  isReplacing: boolean;
+  isClearing: boolean;
 }) {
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)]">
+    <div className="relative">
+      <div
+        className={`grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.78fr)] ${
+          locked ? "pointer-events-none select-none opacity-45" : ""
+        }`}
+        aria-hidden={locked}
+      >
       <section className="rounded-lg border border-white/10 bg-market-panel/92 p-4 shadow-touch">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -814,10 +1334,20 @@ function ImportPage({
             {parsedCount} รายการ
           </div>
         </div>
+        {!locked && (
+          <button
+            type="button"
+            onClick={onLogout}
+            className="mt-4 min-h-11 rounded-lg border border-market-amber/70 bg-market-amber/12 px-4 text-sm font-black text-amber-100 transition hover:bg-market-amber hover:text-market-ink"
+          >
+            ออกจากระบบ
+          </button>
+        )}
 
         <textarea
           value={pasteText}
           onChange={(event) => onTextChange(event.target.value)}
+          disabled={locked}
           className="mt-4 min-h-[320px] w-full rounded-lg border border-market-line bg-market-ink p-4 text-lg font-semibold leading-8 text-emerald-50 outline-none ring-market-mint/40 transition placeholder:text-emerald-100/30 focus:border-market-mint focus:ring-4"
           placeholder="ผักกาดขาว&#9;5&#9;กก.&#9;25&#9;เอาสวย ไม่ช้ำ"
         />
@@ -826,15 +1356,15 @@ function ImportPage({
           <button
             type="button"
             onClick={onCreate}
-            disabled={parsedCount === 0}
+            disabled={locked || parsedCount === 0 || isReplacing || isClearing}
             className="min-h-16 rounded-lg bg-market-green px-5 text-lg font-black text-market-ink transition hover:bg-market-mint disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
           >
-            สร้างรายการซื้อวันนี้
+            {isReplacing ? "กำลังสร้าง..." : "สร้างรายการซื้อวันนี้"}
           </button>
           <button
             type="button"
             onClick={onAppend}
-            disabled={parsedCount === 0}
+            disabled={locked || parsedCount === 0 || isReplacing || isClearing}
             className="min-h-16 rounded-lg border border-market-mint/60 bg-market-mint/12 px-5 text-lg font-black text-market-mint transition hover:bg-market-mint hover:text-market-ink disabled:cursor-not-allowed disabled:border-slate-600 disabled:bg-slate-600 disabled:text-slate-300"
           >
             เพิ่มรายการวันนี้
@@ -842,6 +1372,7 @@ function ImportPage({
           <button
             type="button"
             onClick={onBackup}
+            disabled={locked || isReplacing || isClearing}
             className="min-h-16 rounded-lg border border-market-blue/60 bg-market-blue/12 px-5 text-lg font-black text-sky-100 transition hover:bg-market-blue hover:text-market-ink"
           >
             Backup วันนี้เป็น CSV
@@ -849,9 +1380,10 @@ function ImportPage({
           <button
             type="button"
             onClick={onClear}
+            disabled={locked || isReplacing || isClearing}
             className="min-h-16 rounded-lg border border-market-red/70 bg-market-red/12 px-5 text-lg font-black text-red-100 transition hover:bg-market-red hover:text-white"
           >
-            ล้างข้อมูลวันนี้
+            {isClearing ? "กำลังล้าง..." : "ล้างข้อมูลวันนี้"}
           </button>
         </div>
       </section>
@@ -877,6 +1409,78 @@ function ImportPage({
           ))}
         </div>
       </section>
+      </div>
+      {locked && (
+        <ImportPinOverlay
+          pinValue={pinValue}
+          pinError={pinError}
+          isChecking={isPinChecking}
+          onPinChange={onPinChange}
+          onUnlock={onUnlock}
+        />
+      )}
+    </div>
+  );
+}
+
+function ImportPinOverlay({
+  pinValue,
+  pinError,
+  isChecking,
+  onPinChange,
+  onUnlock,
+  onClose,
+}: {
+  pinValue: string;
+  pinError: string;
+  isChecking: boolean;
+  onPinChange: (value: string) => void;
+  onUnlock: () => void;
+  onClose?: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-market-ink/75 px-3 py-6 backdrop-blur-sm">
+      <form
+        className="w-full max-w-sm rounded-lg border border-market-mint/35 bg-market-panel p-4 shadow-touch sm:p-5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onUnlock();
+        }}
+      >
+        <h2 className="text-center text-2xl font-black text-white">จัดการ Product Master</h2>
+        <p className="mt-2 text-center text-sm font-semibold leading-6 text-emerald-100/70">
+          ใส่ Owner PIN เพื่อเพิ่ม แก้ไข หรือลบข้อมูลสินค้า
+        </p>
+        <label className="mt-4 block text-sm font-bold text-emerald-100/70" htmlFor="import-owner-pin">
+          รหัส PIN
+        </label>
+        <input
+          id="import-owner-pin"
+          type="password"
+          inputMode="numeric"
+          autoComplete="off"
+          value={pinValue}
+          onChange={(event) => onPinChange(event.target.value)}
+          className="mt-2 h-14 w-full rounded-lg border border-market-line bg-market-ink px-4 text-center text-2xl font-black text-white outline-none transition focus:border-market-mint focus:ring-4 focus:ring-market-mint/25"
+        />
+        {pinError && <p className="mt-3 rounded-lg border border-market-red/50 bg-market-red/12 px-3 py-2 text-sm font-black text-red-100">{pinError}</p>}
+        <button
+          type="submit"
+          disabled={isChecking}
+          className="mt-4 min-h-14 w-full rounded-lg bg-market-green px-4 text-base font-black text-market-ink transition hover:bg-market-mint disabled:cursor-wait disabled:bg-slate-600 disabled:text-slate-300"
+        >
+          {isChecking ? "กำลังตรวจสอบ..." : "ปลดล็อก"}
+        </button>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="mt-2 min-h-12 w-full rounded-lg border border-white/15 bg-white/5 px-4 font-black text-white"
+          >
+            ยกเลิก
+          </button>
+        )}
+      </form>
     </div>
   );
 }
@@ -884,22 +1488,21 @@ function ImportPage({
 function PendingPage({
   items,
   totalItems,
-  selectedLetter,
-  onLetterChange,
+  selectedCategory,
+  onCategoryChange,
   activeBuyer,
   onBought,
   onUnavailable,
 }: {
   items: FreshBuyItem[];
   totalItems: number;
-  selectedLetter: string | null;
-  onLetterChange: (letter: string | null) => void;
+  selectedCategory: PendingCategoryFilter;
+  onCategoryChange: (category: PendingCategoryFilter) => void;
   activeBuyer: BuyerName;
   onBought: (item: FreshBuyItem) => void;
   onUnavailable: (item: FreshBuyItem) => void;
 }) {
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const countText = selectedLetter
+  const countText = selectedCategory !== "ทั้งหมด"
     ? `รอซื้อ ${items.length} / ${totalItems} รายการ`
     : `รอซื้อ ${totalItems} รายการ`;
 
@@ -907,40 +1510,31 @@ function PendingPage({
     <section>
       <div className="mb-3 grid gap-2 sm:mb-4 sm:gap-3 xl:grid-cols-[minmax(220px,0.55fr)_minmax(0,1.45fr)]">
         <SectionHeader
-          title="ต้องซื้อวันนี้"
+          title="รายการซื้อวันนี้"
           detail={`ผู้ใช้งาน: ${activeBuyer} | ${countText}`}
           icon={ShoppingBasket}
         />
-        <div className="grid min-h-[52px] items-center gap-2 rounded-lg border border-white/10 bg-market-panel/72 p-2 sm:min-h-[68px] sm:gap-3 sm:p-3 md:grid-cols-[1fr_auto]">
-          <div className="min-h-7 text-center sm:min-h-9 md:text-left">
-            {selectedLetter && (
-              <p className="text-xl font-black leading-tight text-white sm:text-2xl">
-                กำลังกรอง: <span className="text-market-mint">{selectedLetter}</span>
-              </p>
-            )}
-          </div>
-          <div className="flex flex-wrap justify-end gap-2 sm:gap-3">
+        <div className="flex min-h-[52px] flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-market-panel/72 p-2 sm:min-h-[68px] sm:p-3">
+          {(["ทั้งหมด", ...PRODUCT_CATEGORIES] as PendingCategoryFilter[]).map((category) => (
             <button
+              key={category}
               type="button"
-              onClick={() => setIsSearchOpen(true)}
-              className="min-h-10 rounded-lg border border-market-mint/70 bg-market-green px-3 text-sm font-black text-market-ink transition hover:bg-market-mint sm:min-h-11 sm:px-4"
+              onClick={() => onCategoryChange(category)}
+              className={`min-h-10 rounded-lg border px-3 text-sm font-black transition ${
+                selectedCategory === category
+                  ? "border-market-mint bg-market-mint text-market-ink"
+                  : "border-white/12 bg-white/5 text-emerald-50"
+              }`}
             >
-              ค้นหา
+              {category}
             </button>
-            <button
-              type="button"
-              onClick={() => onLetterChange(null)}
-              className="min-h-10 rounded-lg border border-white/70 bg-white px-3 text-sm font-black text-market-ink transition hover:border-market-mint/80 sm:min-h-11 sm:px-4"
-            >
-              ทั้งหมด
-            </button>
-          </div>
+          ))}
         </div>
       </div>
       {items.length === 0 ? (
-        <EmptyState text={selectedLetter ? `ไม่มีรายการขึ้นต้นด้วย ${selectedLetter}` : "ไม่มีรายการรอซื้อแล้ว"} />
+        <EmptyState text={selectedCategory === "ทั้งหมด" ? "ไม่มีรายการรอซื้อแล้ว" : `ไม่มีรายการในหมวด ${selectedCategory}`} />
       ) : (
-        <div className="grid gap-2 sm:grid-cols-2 sm:gap-3 lg:grid-cols-3 2xl:grid-cols-4">
+        <div className="grid gap-2 min-[560px]:grid-cols-2 sm:gap-2.5">
           {items.map((item) => (
             <PendingProductCard
               key={item.id}
@@ -951,58 +1545,7 @@ function PendingPage({
           ))}
         </div>
       )}
-      {isSearchOpen && (
-        <ThaiLetterSearchModal
-          selectedLetter={selectedLetter}
-          onSelect={(letter) => {
-            onLetterChange(letter);
-            setIsSearchOpen(false);
-          }}
-          onCancel={() => setIsSearchOpen(false)}
-        />
-      )}
     </section>
-  );
-}
-
-function ThaiLetterSearchModal({
-  selectedLetter,
-  onSelect,
-  onCancel,
-}: {
-  selectedLetter: string | null;
-  onSelect: (letter: string) => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="no-print fixed inset-0 z-50 grid place-items-center bg-black/72 px-4 backdrop-blur-sm">
-      <section className="w-full max-w-lg rounded-lg border border-market-mint/30 bg-market-panel p-4 shadow-touch">
-        <h2 className="text-center text-2xl font-black text-white">เลือกตัวอักษรค้นหา</h2>
-        <div className="mt-4 grid grid-cols-6 gap-2 sm:grid-cols-7">
-          {THAI_LETTERS.map((letter) => (
-            <button
-              key={letter}
-              type="button"
-              onClick={() => onSelect(letter)}
-              className={`grid h-[52px] min-w-[52px] place-items-center rounded-md border px-2 text-[21px] font-bold leading-none transition ${
-                selectedLetter === letter
-                  ? "border-market-mint bg-market-mint text-market-ink"
-                  : "border-white/70 bg-white text-market-ink hover:border-market-mint/80"
-              }`}
-            >
-              {letter}
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="mt-4 min-h-12 w-full rounded-lg border border-white/14 bg-white/6 px-4 text-base font-black text-emerald-50"
-        >
-          ยกเลิก
-        </button>
-      </section>
-    </div>
   );
 }
 
@@ -1016,30 +1559,30 @@ function PendingProductCard({
   onUnavailable: () => void;
 }) {
   return (
-    <article className="flex min-h-[138px] flex-col justify-between rounded-lg border border-white/10 bg-market-panel/92 p-3 shadow-touch sm:min-h-[178px] sm:p-4">
-      <div>
-        <h3 className="line-clamp-2 text-xl font-black leading-tight text-white sm:text-2xl">{item.name}</h3>
-        <p className="mt-1 text-lg font-black text-market-mint sm:mt-2 sm:text-xl">
+    <article className="grid w-full max-w-full grid-cols-2 gap-2 rounded-lg border border-white/10 bg-market-panel/92 p-2 shadow-touch min-[560px]:grid-cols-[minmax(0,1fr)_max-content_76px_82px] min-[560px]:items-center">
+      <div className="col-span-2 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 min-[560px]:contents">
+        <h3 className="line-clamp-2 min-w-0 text-lg font-black leading-tight text-white min-[560px]:text-base lg:text-lg">
+          {item.name}
+        </h3>
+        <p className="shrink-0 whitespace-nowrap text-sm font-black leading-tight text-market-mint min-[560px]:text-[13px] lg:text-sm">
           {item.quantity} {item.unit}
         </p>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:mt-4">
-        <button
-          type="button"
-          onClick={onBought}
-          className="min-h-11 rounded-lg bg-market-green px-3 text-sm font-black text-market-ink transition hover:bg-market-mint sm:min-h-14 sm:text-base"
-        >
-          ซื้อแล้ว
-        </button>
-        <button
-          type="button"
-          onClick={onUnavailable}
-          className="min-h-11 rounded-lg border border-market-red/70 bg-market-red/12 px-3 text-sm font-black text-red-100 transition hover:bg-market-red hover:text-white sm:min-h-14 sm:text-base"
-        >
-          ไม่มีของ
-        </button>
-      </div>
+      <button
+        type="button"
+        onClick={onBought}
+        className="min-h-10 rounded-lg bg-market-green px-2 text-sm font-black text-market-ink transition hover:bg-market-mint min-[560px]:min-h-9 min-[560px]:text-xs lg:text-sm"
+      >
+        ซื้อแล้ว
+      </button>
+      <button
+        type="button"
+        onClick={onUnavailable}
+        className="min-h-10 rounded-lg border border-market-red/70 bg-market-red/12 px-2 text-sm font-black text-red-100 transition hover:bg-market-red hover:text-white min-[560px]:min-h-9 min-[560px]:text-xs lg:text-sm"
+      >
+        ไม่มีของ
+      </button>
     </article>
   );
 }
@@ -1137,11 +1680,11 @@ function BoughtItemRow({
   const vehicleStatus = getVehicleStatus(item);
   const statusClassName = getVehicleStatusClassName(vehicleStatus);
   const actualPriceText = item.actualPrice === "" ? "-" : `${item.actualPrice}`;
-  const boughtTimeText = formatDisplayTime(item.boughtAt);
+  const boughtTimeText = formatPurchaseTimeOnly(item.boughtAt);
 
   return (
     <>
-      <article className="grid w-full max-w-full gap-1.5 rounded-lg border border-market-green/30 bg-market-green/10 p-2.5 shadow-touch sm:hidden">
+      <article className="viewport-mobile-card grid w-full max-w-full gap-1.5 rounded-lg border border-market-green/30 bg-market-green/10 p-2.5 shadow-touch">
         <div>
           <h3 className="line-clamp-2 text-lg font-black leading-tight text-white">{item.name}</h3>
           <p className="mt-1 text-[13px] font-bold leading-snug text-emerald-50/86">
@@ -1173,14 +1716,14 @@ function BoughtItemRow({
         </div>
       </article>
 
-      <article className="hidden gap-3 rounded-lg border border-market-green/30 bg-market-green/10 p-3 shadow-touch sm:grid md:grid-cols-[minmax(180px,1.45fr)_100px_100px_105px_minmax(130px,1fr)_150px_104px_142px] md:items-center">
+      <article className="viewport-fluid-row bought-fluid-row w-full max-w-full items-center gap-1.5 rounded-lg border border-market-green/30 bg-market-green/10 p-2 shadow-touch sm:gap-2 xl:gap-3 xl:p-3">
         <div>
-          <p className="text-[11px] font-bold leading-tight text-emerald-100/50 md:hidden">สินค้า</p>
-          <h3 className="line-clamp-2 text-xl font-black leading-tight text-white">{item.name}</h3>
+          <p className="fluid-row-label text-[11px] font-bold leading-tight text-emerald-100/50">สินค้า</p>
+          <h3 className="fluid-row-title line-clamp-2 font-black leading-tight text-white">{item.name}</h3>
         </div>
         <div>
-          <p className="text-[11px] font-bold leading-tight text-emerald-100/50 md:hidden">จำนวน</p>
-          <p className="text-lg font-black text-market-mint">
+          <p className="fluid-row-label text-[11px] font-bold leading-tight text-emerald-100/50">จำนวน</p>
+          <p className="text-sm font-black leading-tight text-market-mint sm:text-base xl:text-lg">
             {item.quantity} {item.unit}
           </p>
         </div>
@@ -1191,16 +1734,16 @@ function BoughtItemRow({
         <button
           type="button"
           onClick={onEditPrice}
-          className="flex min-h-12 items-center justify-center rounded-lg border border-market-mint/50 bg-market-mint/12 px-3 font-black text-market-mint transition hover:bg-market-mint hover:text-market-ink"
+          className="fluid-row-action flex items-center justify-center rounded-lg border border-market-mint/50 bg-market-mint/12 font-black text-market-mint transition hover:bg-market-mint hover:text-market-ink"
         >
           แก้ราคา
         </button>
         <button
           type="button"
           onClick={onBack}
-          className="flex min-h-12 items-center justify-center gap-2 rounded-lg border border-market-blue/60 bg-market-blue/12 px-3 font-black text-sky-100"
+          className="fluid-row-action flex items-center justify-center gap-1 rounded-lg border border-market-blue/60 bg-market-blue/12 font-black text-sky-100 xl:gap-2"
         >
-          <RotateCcw className="h-5 w-5" />
+          <RotateCcw className="h-4 w-4 shrink-0 xl:h-5 xl:w-5" />
           กลับไปรอซื้อ
         </button>
       </article>
@@ -1210,9 +1753,15 @@ function BoughtItemRow({
 
 function RowValue({ label, value, strong = false }: { label: string; value: string; strong?: boolean }) {
   return (
-    <div>
-      <p className="text-[11px] font-bold leading-tight text-emerald-100/50 md:hidden">{label}</p>
-      <p className={`${strong ? "text-sm font-black text-white sm:text-lg" : "text-sm font-bold text-emerald-50"}`}>
+    <div className="min-w-0">
+      <p className="fluid-row-label text-[11px] font-bold leading-tight text-emerald-100/50">{label}</p>
+      <p
+        className={`truncate leading-tight ${
+          strong
+            ? "text-sm font-black text-white xl:text-lg"
+            : "text-xs font-bold text-emerald-50 sm:text-sm"
+        }`}
+      >
         {value}
       </p>
     </div>
@@ -1223,9 +1772,9 @@ function VehicleStatusBadge({ status }: { status: VehicleStatus }) {
   const className = getVehicleStatusClassName(status);
 
   return (
-    <div>
-      <p className="text-[11px] font-bold leading-tight text-emerald-100/50 md:hidden">สถานะขึ้นรถ</p>
-      <span className={`inline-flex min-h-7 items-center rounded-lg border px-2 text-xs font-black sm:min-h-9 sm:px-3 sm:text-sm ${className}`}>
+    <div className="min-w-0">
+      <p className="fluid-row-label text-[11px] font-bold leading-tight text-emerald-100/50">สถานะขึ้นรถ</p>
+      <span className={`inline-flex min-h-7 max-w-full items-center rounded-lg border px-1.5 text-[11px] font-black leading-tight sm:px-2 xl:min-h-9 xl:px-3 xl:text-sm ${className}`}>
         {VEHICLE_STATUS_LABELS[status]}
       </span>
     </div>
@@ -1264,11 +1813,11 @@ function UnavailablePage({
 }
 
 function UnavailableItemRow({ item, onBack }: { item: FreshBuyItem; onBack: () => void }) {
-  const timeText = formatDisplayTime(item.boughtAt || item.checkedAt);
+  const timeText = formatPurchaseTimeOnly(item.boughtAt || item.checkedAt);
 
   return (
     <>
-      <article className="grid w-full max-w-full gap-1.5 rounded-lg border border-market-red/35 bg-market-red/10 p-2.5 shadow-touch sm:hidden">
+      <article className="viewport-mobile-card grid w-full max-w-full gap-1.5 rounded-lg border border-market-red/35 bg-market-red/10 p-2.5 shadow-touch">
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
           <h3 className="line-clamp-2 text-lg font-black leading-tight text-white">{item.name}</h3>
           <button
@@ -1285,14 +1834,14 @@ function UnavailableItemRow({ item, onBack }: { item: FreshBuyItem; onBack: () =
         </p>
       </article>
 
-      <article className="hidden gap-3 rounded-lg border border-market-red/35 bg-market-red/10 p-3 shadow-touch sm:grid md:grid-cols-[minmax(220px,1.6fr)_120px_140px_minmax(150px,1fr)_150px] md:items-center">
+      <article className="viewport-fluid-row unavailable-fluid-row w-full max-w-full items-center gap-1.5 rounded-lg border border-market-red/35 bg-market-red/10 p-2 shadow-touch sm:gap-2 xl:gap-3 xl:p-3">
         <div>
-          <p className="text-[11px] font-bold leading-tight text-red-100/60 md:hidden">สินค้า</p>
-          <h3 className="line-clamp-2 text-xl font-black leading-tight text-white">{item.name}</h3>
+          <p className="fluid-row-label text-[11px] font-bold leading-tight text-red-100/60">สินค้า</p>
+          <h3 className="fluid-row-title line-clamp-2 font-black leading-tight text-white">{item.name}</h3>
         </div>
         <div>
-          <p className="text-[11px] font-bold leading-tight text-red-100/60 md:hidden">จำนวน</p>
-          <p className="text-lg font-black text-market-mint">
+          <p className="fluid-row-label text-[11px] font-bold leading-tight text-red-100/60">จำนวน</p>
+          <p className="text-sm font-black leading-tight text-market-mint sm:text-base xl:text-lg">
             {item.quantity} {item.unit}
           </p>
         </div>
@@ -1301,9 +1850,9 @@ function UnavailableItemRow({ item, onBack }: { item: FreshBuyItem; onBack: () =
         <button
           type="button"
           onClick={onBack}
-          className="flex min-h-12 items-center justify-center gap-2 rounded-lg border border-market-blue/60 bg-market-blue/12 px-3 font-black text-sky-100"
+          className="fluid-row-action flex items-center justify-center gap-1 rounded-lg border border-market-blue/60 bg-market-blue/12 font-black text-sky-100 xl:gap-2"
         >
-          <RotateCcw className="h-5 w-5" />
+          <RotateCcw className="h-4 w-4 shrink-0 xl:h-5 xl:w-5" />
           กลับไปรอซื้อ
         </button>
       </article>
@@ -1365,11 +1914,11 @@ function CheckItemRow({
   onMissing: () => void;
 }) {
   const actualPriceText = item.actualPrice === "" ? "-" : `${item.actualPrice}`;
-  const boughtTimeText = formatDisplayTime(item.boughtAt);
+  const boughtTimeText = formatPurchaseTimeOnly(item.boughtAt);
 
   return (
     <>
-      <article className="grid w-full max-w-full gap-1.5 rounded-lg border border-white/10 bg-market-panel/92 p-2.5 shadow-touch sm:hidden">
+      <article className="viewport-mobile-card grid w-full max-w-full gap-1.5 rounded-lg border border-white/10 bg-market-panel/92 p-2.5 shadow-touch">
         <p className="text-[13px] font-bold leading-snug text-emerald-50/90">
           <span className="font-black text-white">{item.name}</span> | {item.quantity} {item.unit} | {actualPriceText} | {item.buyerName || "-"} | {boughtTimeText}
         </p>
@@ -1391,14 +1940,14 @@ function CheckItemRow({
         </div>
       </article>
 
-      <article className="hidden gap-3 rounded-lg border border-white/10 bg-market-panel/92 p-3 shadow-touch sm:grid md:grid-cols-[minmax(190px,1.5fr)_110px_110px_120px_minmax(140px,1fr)_88px_112px] md:items-center">
+      <article className="viewport-fluid-row check-fluid-row w-full max-w-full items-center gap-1.5 rounded-lg border border-white/10 bg-market-panel/92 p-2 shadow-touch sm:gap-2 xl:gap-3 xl:p-3">
         <div>
-          <p className="text-[11px] font-bold leading-tight text-emerald-100/50 md:hidden">สินค้า</p>
-          <h3 className="line-clamp-2 text-xl font-black leading-tight text-white">{item.name}</h3>
+          <p className="fluid-row-label text-[11px] font-bold leading-tight text-emerald-100/50">สินค้า</p>
+          <h3 className="fluid-row-title line-clamp-2 font-black leading-tight text-white">{item.name}</h3>
         </div>
         <div>
-          <p className="text-[11px] font-bold leading-tight text-emerald-100/50 md:hidden">จำนวน</p>
-          <p className="text-lg font-black text-market-mint">
+          <p className="fluid-row-label text-[11px] font-bold leading-tight text-emerald-100/50">จำนวน</p>
+          <p className="text-sm font-black leading-tight text-market-mint sm:text-base xl:text-lg">
             {item.quantity} {item.unit}
           </p>
         </div>
@@ -1408,14 +1957,14 @@ function CheckItemRow({
         <button
           type="button"
           onClick={onComplete}
-          className="min-h-12 rounded-lg bg-market-green px-3 text-base font-black text-market-ink transition hover:bg-market-mint"
+          className="fluid-row-action rounded-lg bg-market-green font-black text-market-ink transition hover:bg-market-mint"
         >
           ครบ
         </button>
         <button
           type="button"
           onClick={onMissing}
-          className="min-h-12 rounded-lg border border-market-amber/70 bg-market-amber/12 px-3 text-base font-black text-amber-100 transition hover:bg-market-amber hover:text-market-ink"
+          className="fluid-row-action rounded-lg border border-market-amber/70 bg-market-amber/12 font-black text-amber-100 transition hover:bg-market-amber hover:text-market-ink"
         >
           ของไม่ครบ
         </button>

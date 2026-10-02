@@ -37,7 +37,94 @@ npm install
 npm run dev
 ```
 
-ข้อมูลจะถูกเก็บในตาราง `buy_items` โดยใช้ `day_key` ของวันปัจจุบัน และ realtime subscription จะ sync รายการซื้อระหว่างมือถือ แท็บเล็ต และ PC ที่เปิดวันเดียวกัน
+### Product Master / เช็คสินค้า
+
+Phase 1 adds a permanent `product_master` table that is separate from the global
+`buy_items` working list. Review and run this file in Supabase SQL Editor before
+deploying the Product Check UI:
+
+```text
+supabase/product_master.sql
+```
+
+The migration is non-destructive: it does not update or delete `buy_items`.
+Removing a master product sets `active=false`, so old shopping history remains
+unchanged. The six initial categories are fixed to:
+
+```text
+ผักใบ, ผักผล, ผักเมืองหนาว, ผักแพ๊คและเห็ด, เครื่องเทศ, อื่นๆ
+```
+
+The normal workflow is now `เช็คสินค้า` → enter quantity/select unit → send one
+product row. Each send appends one pending `buy_items` row and never replaces the
+current list. Active Product Master products are hidden when a normalized product
+name already exists anywhere in the current global `buy_items` list, regardless
+of purchase or vehicle status. Name matching uses Unicode NFKC normalization,
+trimmed/collapsed whitespace, and Thai lowercase comparison; Product Master does
+not yet have a persistent product id link in `buy_items`, so distinct products
+that normalize to the same name cannot be distinguished. Starting a new working
+cycle uses the existing atomic global clear RPC and never changes Product Master.
+The previous Excel parser remains available inside the collapsed owner-only
+legacy tools section.
+
+ข้อมูลออนไลน์ V1.3 ใช้ Single Global Buy List จาก Supabase table `buy_items` เพียงตารางเดียว ทุกอุปกรณ์อ่านและแก้รายการชุดเดียวกันจากทั้งตารางโดยไม่ filter ด้วย `day_key`, `activeDayKey`, `batch_id`, current date หรือ localStorage key
+
+คอลัมน์ `day_key` เดิมยังอยู่เพื่อ compatibility/backup แต่ application logic ไม่ใช้เลือกชุดข้อมูลที่แสดงหรือแก้ไขแล้ว
+
+### Production Cleanup Review
+
+production ปัจจุบันอาจมี rows หลาย `day_key` อยู่ใน `buy_items` ต้อง backup ก่อนและค่อยรัน cleanup SQL ที่ owner review แล้วเท่านั้น:
+
+```sql
+select day_key, status, count(*) as item_count, max(updated_at) as latest_update
+from public.buy_items
+group by day_key, status
+order by latest_update desc nulls last, day_key desc, status;
+```
+
+owner-selected live data:
+
+- `day_key = '2026-07-12'`
+- expected: total 111, bought 105, unavailable 6, loaded 76, unchecked 35
+
+backup candidate:
+
+- `day_key = '2026-07-14'`
+- expected: total 111, pending 111
+
+cleanup SQL ต้องลบ rows อื่นออกจาก live `buy_items` และคงไว้เฉพาะ `day_key = '2026-07-12'` หลังจาก backup แล้วเท่านั้น ห้ามใช้ SQL Current Batch เดิม และห้ามสร้าง `freshbuy_batches` หรือ `batch_id`
+
+### Atomic Replace / Clear RPC
+
+หลัง cleanup production และ validate ว่าเหลือ live rows ถูกต้องแล้ว ให้ owner/admin review และรัน:
+
+```text
+supabase/atomic_global_replace.sql
+```
+
+ไฟล์นี้สร้าง RPC:
+
+- `public.freshbuy_replace_all_items(items jsonb)` returns `success`, `inserted_count`
+- `public.freshbuy_clear_all_items()` returns `success`, `deleted_count`
+
+ทั้งสอง function ใช้ `pg_advisory_xact_lock(hashtext('freshbuy_global_buy_items'))` เพื่อกัน replace/clear ชนกันจากหลายเครื่อง และใช้ `SECURITY INVOKER` ไม่ต้องใช้ service role key ใน frontend
+
+RPC replace รองรับ column ที่ระบบใช้จริง:
+
+```text
+id, name, quantity, unit, max_price, note, status, buyer_name,
+bought_at, actual_price, checked_at, issue_note, vehicle_status, day_key
+```
+
+ลำดับ production ที่แนะนำ:
+
+1. ตรวจ backup files
+2. owner review และรัน `production_single_global_list_owner_selected_READY_TO_REVIEW.sql`
+3. validate production เหลือ 111 rows ตาม expected counts
+4. owner review และรัน `supabase/atomic_global_replace.sql`
+5. ตรวจว่า RPC execute ได้ด้วย anon role
+6. deploy application
+7. UAT Desktop/Mobile/Tablet
 
 ## Vercel Deploy
 

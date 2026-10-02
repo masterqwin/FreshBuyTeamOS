@@ -1,7 +1,12 @@
 import type { BuyerName, FreshBuyItem, ItemStatus, ParsedImportRow } from "./types";
 
 export const STORAGE_KEY = "fresh-buy-team-os-v1";
+export const PRODUCT_MASTER_STORAGE_KEY = "fresh-buy-product-master-v1";
 export const BUYERS: BuyerName[] = ["ผู้ซื้อ 1", "ผู้ซื้อ 2", "ผู้ซื้อ 3", "คนเช็คของ"];
+
+export function normalizeProductName(value: string) {
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("th-TH");
+}
 
 export const STATUS_LABELS: Record<ItemStatus, string> = {
   pending: "รอซื้อ",
@@ -89,13 +94,29 @@ export function parseImportText(text: string): ParsedImportRow[] {
     .filter((row) => row.name.length > 0);
 }
 
+export function createUuid() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
 export function rowsToItems(rows: ParsedImportRow[]): FreshBuyItem[] {
-  const stamp = Date.now();
-  return rows.map((row, index) => ({
-    id:
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${stamp}-${index}-${row.name}`,
+  return rows.map((row) => ({
+    id: createUuid(),
     name: row.name,
     quantity: row.quantity,
     unit: row.unit,
