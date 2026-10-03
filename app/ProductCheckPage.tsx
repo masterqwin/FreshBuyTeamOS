@@ -155,7 +155,7 @@ export default function ProductCheckPage({
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("ทั้งหมด");
   const [searchText, setSearchText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  const [sendingProductIds, setSendingProductIds] = useState<string[]>([]);
+  const [isBulkSubmitting, setIsBulkSubmitting] = useState(false);
   const [isStartingNewCycle, setIsStartingNewCycle] = useState(false);
   const [isSavingProduct, setIsSavingProduct] = useState(false);
   const [productError, setProductError] = useState("");
@@ -164,7 +164,7 @@ export default function ProductCheckPage({
   );
   const [editor, setEditor] = useState<ProductEditorState | null>(null);
   const hydratedRef = useRef(false);
-  const sendingProductIdsRef = useRef<Set<string>>(new Set());
+  const bulkSubmittingRef = useRef(false);
 
   function applyProducts(nextProducts: ProductMasterItem[], clearQuantities = false) {
     setProducts(nextProducts);
@@ -245,8 +245,7 @@ export default function ProductCheckPage({
     }
   }, [products]);
 
-  const filteredProducts = useMemo(() => {
-    const query = searchText.trim().toLocaleLowerCase("th-TH");
+  const availableProducts = useMemo(() => {
     const currentProductNames = new Set(
       currentBuyItems.map((item) => normalizeProductName(item.name)),
     );
@@ -260,11 +259,23 @@ export default function ProductCheckPage({
       if (currentProductNames.has(normalizeProductName(product.name))) return false;
       if (currentPhoneProductIds.has(product.id)) return false;
       if (currentPhoneProductNames.has(normalizeProductName(product.name))) return false;
+      return true;
+    });
+  }, [currentBuyItems, currentPhoneOrderItems, products]);
+
+  const filteredProducts = useMemo(() => {
+    const query = searchText.trim().toLocaleLowerCase("th-TH");
+    return availableProducts.filter((product) => {
       const matchesCategory = categoryFilter === "ทั้งหมด" || product.category === categoryFilter;
       const matchesSearch = !query || product.name.toLocaleLowerCase("th-TH").includes(query);
       return matchesCategory && matchesSearch;
     });
-  }, [categoryFilter, currentBuyItems, currentPhoneOrderItems, products, searchText]);
+  }, [availableProducts, categoryFilter, searchText]);
+
+  const selectedProducts = useMemo(
+    () => availableProducts.filter((product) => hasPurchaseQuantity(checkValues[product.id]?.quantity ?? "")),
+    [availableProducts, checkValues],
+  );
 
   async function startNewCheck() {
     if (isStartingNewCycle) return;
@@ -285,49 +296,68 @@ export default function ProductCheckPage({
     }
   }
 
-  async function sendProduct(product: ProductMasterItem) {
-    if (sendingProductIdsRef.current.has(product.id)) return;
-    const value = checkValues[product.id] ?? {
-      quantity: "",
-      unit: normalizeProductUnit(product.defaultUnit),
-    };
-    if (!hasPurchaseQuantity(value.quantity)) {
-      window.alert("กรุณาใส่จำนวนที่มากกว่า 0");
-      playBeep("warn");
-      return;
-    }
-
-    const newItems = rowsToItems([
-      {
-        name: product.name,
-        quantity: value.quantity.trim(),
-        unit: value.unit,
-        maxPrice: product.defaultMaxPrice === "" ? 0 : product.defaultMaxPrice,
-        note: product.note,
-      },
-    ]);
-
-    sendingProductIdsRef.current.add(product.id);
-    setSendingProductIds(Array.from(sendingProductIdsRef.current));
+  async function sendSelectedProducts() {
+    if (bulkSubmittingRef.current || selectedProducts.length === 0) return;
+    bulkSubmittingRef.current = true;
+    setIsBulkSubmitting(true);
     setProductError("");
+    const successfulIds = new Set<string>();
+    const failedNames: string[] = [];
     try {
-      const succeeded = product.purchaseMethod === "phone"
-        ? await onSendPhone({
-            id: createUuid(),
-            productMasterId: product.id,
-            productName: product.name,
+      const walkProducts = selectedProducts.filter((product) => product.purchaseMethod === "walk");
+      if (walkProducts.length > 0) {
+        const walkItems = rowsToItems(walkProducts.map((product) => {
+          const value = checkValues[product.id];
+          return {
+            name: product.name,
             quantity: value.quantity.trim(),
             unit: value.unit,
-            supplierName: product.supplierName,
+            maxPrice: product.defaultMaxPrice === "" ? 0 : product.defaultMaxPrice,
             note: product.note,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          })
-        : await onSendWalk(newItems);
-      if (!succeeded) setProductError(`ส่ง “${product.name}” ไม่สำเร็จ กรุณาลองอีกครั้ง`);
+          };
+        }));
+        if (await onSendWalk(walkItems)) {
+          walkProducts.forEach((product) => successfulIds.add(product.id));
+        } else {
+          failedNames.push(...walkProducts.map((product) => product.name));
+        }
+      }
+
+      const phoneProducts = selectedProducts.filter((product) => product.purchaseMethod === "phone");
+      const phoneResults = await Promise.all(phoneProducts.map(async (product) => {
+        const value = checkValues[product.id];
+        const timestamp = new Date().toISOString();
+        const succeeded = await onSendPhone({
+          id: createUuid(),
+          productMasterId: product.id,
+          productName: product.name,
+          quantity: value.quantity.trim(),
+          unit: value.unit,
+          supplierName: product.supplierName,
+          note: product.note,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+        return { product, succeeded };
+      }));
+      for (const { product, succeeded } of phoneResults) {
+        if (succeeded) successfulIds.add(product.id);
+        else failedNames.push(product.name);
+      }
+
+      if (successfulIds.size > 0) {
+        setCheckValues((current) => Object.fromEntries(Object.entries(current).map(([id, value]) => [
+          id,
+          successfulIds.has(id) ? { ...value, quantity: "" } : value,
+        ])));
+      }
+      if (failedNames.length > 0) {
+        setProductError(`ส่งไม่สำเร็จ: ${failedNames.join(", ")} กรุณาลองอีกครั้ง`);
+        playBeep("warn");
+      }
     } finally {
-      sendingProductIdsRef.current.delete(product.id);
-      setSendingProductIds(Array.from(sendingProductIdsRef.current));
+      bulkSubmittingRef.current = false;
+      setIsBulkSubmitting(false);
     }
   }
 
@@ -535,6 +565,19 @@ export default function ProductCheckPage({
         </div>
       )}
 
+      <div className="mt-3 flex flex-col gap-2 rounded-lg border border-market-green/35 bg-market-green/[0.08] p-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="font-black text-emerald-50">เลือกแล้ว {selectedProducts.length} รายการ</p>
+        <button
+          type="button"
+          onClick={() => void sendSelectedProducts()}
+          disabled={selectedProducts.length === 0 || isBulkSubmitting}
+          className="flex min-h-12 items-center justify-center gap-2 rounded-lg bg-market-green px-5 font-black text-market-ink disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
+        >
+          <Send className={`h-5 w-5 ${isBulkSubmitting ? "animate-pulse" : ""}`} />
+          {isBulkSubmitting ? "กำลังส่งรายการ..." : "ส่งรายการ"}
+        </button>
+      </div>
+
       <div className="mt-3 grid gap-2">
         {isLoading ? (
           <div className="rounded-lg border border-white/10 bg-market-panel/80 p-8 text-center font-black text-emerald-100/70">
@@ -551,12 +594,11 @@ export default function ProductCheckPage({
               unit: normalizeProductUnit(product.defaultUnit),
             };
             const selected = hasPurchaseQuantity(value.quantity);
-            const isSendingProduct = sendingProductIds.includes(product.id);
             const categoryStyle = CATEGORY_ROW_STYLES[product.category];
             return (
               <article
                 key={product.id}
-                className={`grid gap-2 rounded-lg border p-2.5 shadow-touch transition-colors sm:grid-cols-[minmax(160px,1fr)_120px_120px_48px_auto] sm:items-center sm:p-3 ${categoryStyle.row} ${
+                className={`grid gap-2 rounded-lg border p-2.5 shadow-touch transition-colors sm:grid-cols-[minmax(160px,1fr)_120px_120px_auto] sm:items-center sm:p-3 ${categoryStyle.row} ${
                   selected ? "ring-1 ring-market-green/55" : ""
                 }`}
               >
@@ -584,7 +626,7 @@ export default function ProductCheckPage({
                     </p>
                   )}
                 </div>
-                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_48px] gap-2 sm:contents">
+                <div className="grid grid-cols-2 gap-2 sm:contents">
                   <label>
                     <span className="mb-1 block text-[11px] font-bold text-emerald-100/55 sm:hidden">จำนวน</span>
                     <input
@@ -615,16 +657,6 @@ export default function ProductCheckPage({
                       {PRODUCT_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
                     </select>
                   </label>
-                  <button
-                    type="button"
-                    onClick={() => void sendProduct(product)}
-                    disabled={!selected || isSendingProduct}
-                    aria-label={`ส่ง ${product.name} ไป${product.purchaseMethod === "phone" ? "รายการโทรสั่ง" : "รายการซื้อวันนี้"}`}
-                    title={product.purchaseMethod === "phone" ? "ส่งไปรายการโทรสั่ง" : "ส่งไปรายการซื้อวันนี้"}
-                    className="mt-[19px] grid h-12 w-12 place-items-center rounded-lg bg-market-green text-market-ink disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300 sm:mt-0"
-                  >
-                    <Send className={`h-5 w-5 ${isSendingProduct ? "animate-pulse" : ""}`} />
-                  </button>
                 </div>
                 {isAdminUnlocked ? (
                   <div className="grid grid-cols-2 gap-2 sm:w-[180px]">

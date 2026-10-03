@@ -7,7 +7,9 @@ import {
   FileDown,
   History,
   PackageX,
+  Pencil,
   PhoneCall,
+  Printer,
   RotateCcw,
   ShoppingBasket,
   Truck,
@@ -51,20 +53,22 @@ import {
 } from "@/lib/supabaseProductMaster";
 import {
   appendPhoneOrderItem,
-  deletePhoneOrderItem,
   fetchPhoneOrderItems,
   phoneOrderFromRealtimeRow,
   removePhoneOrderSubscription,
   subscribeToPhoneOrderItems,
+  updatePhoneOrderItem,
   type PhoneOrderRealtimePayload,
 } from "@/lib/supabasePhoneOrders";
 import {
   PRODUCT_CATEGORIES,
+  PRODUCT_UNITS,
   type BuyerName,
   type FreshBuyItem,
   type ItemStatus,
   type ProductCategory,
   type ProductMasterItem,
+  type ProductUnit,
   type PhoneOrderItem,
   type VehicleStatus,
 } from "@/lib/types";
@@ -75,6 +79,7 @@ type BoughtFilter = "bought" | "loaded" | "incomplete" | "unchecked";
 type PendingCategoryFilter = "ทั้งหมด" | ProductCategory;
 type DataMode = "connecting" | "supabase" | "offline-cache" | "error";
 type RealtimeStatus = "connecting" | "connected" | "offline" | "error";
+type PrintMode = "history" | "purchase" | null;
 type PriceModalState = {
   item: FreshBuyItem;
   mode: PriceModalMode;
@@ -270,6 +275,7 @@ export default function Home() {
   const [buyPrice, setBuyPrice] = useState("");
   const [boughtFilter, setBoughtFilter] = useState<BoughtFilter>("bought");
   const [pendingCategoryFilter, setPendingCategoryFilter] = useState<PendingCategoryFilter>("ทั้งหมด");
+  const [printMode, setPrintMode] = useState<PrintMode>(null);
   const [productCategoryByName, setProductCategoryByName] = useState<Record<string, ProductCategory>>({});
   const [isBackupConfirmOpen, setIsBackupConfirmOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -297,6 +303,17 @@ export default function Home() {
     const intervalId = window.setInterval(refreshClock, 60_000);
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    const finishPrinting = () => setPrintMode(null);
+    window.addEventListener("afterprint", finishPrinting);
+    return () => window.removeEventListener("afterprint", finishPrinting);
+  }, []);
+
+  function printView(mode: Exclude<PrintMode, null>) {
+    setPrintMode(mode);
+    window.setTimeout(() => window.print(), 0);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -718,15 +735,20 @@ export default function Home() {
     }
   }
 
-  async function returnPhoneOrderToCheck(item: PhoneOrderItem) {
-    if (!window.confirm(`นำ “${item.productName}” กลับไปหน้าเช็คสินค้า?`)) return;
-
+  async function updatePhoneOrderSnapshot(
+    item: PhoneOrderItem,
+    updates: Pick<PhoneOrderItem, "quantity" | "unit" | "supplierName">,
+  ) {
     try {
-      if (isSupabaseConfigured) await deletePhoneOrderItem(item.id);
-      setPhoneOrderItems((current) => current.filter((candidate) => candidate.id !== item.id));
-      playBeep("soft");
+      const saved = isSupabaseConfigured
+        ? await updatePhoneOrderItem(item.id, updates)
+        : { ...item, ...updates, updatedAt: new Date().toISOString() };
+      setPhoneOrderItems((current) => current.map((candidate) => candidate.id === saved.id ? saved : candidate));
+      playBeep("ok");
+      return true;
     } catch (error) {
-      reportSyncError("Supabase delete phone order failed", error);
+      reportSyncError("Supabase update phone order failed", error);
+      return false;
     }
   }
 
@@ -1122,9 +1144,11 @@ export default function Home() {
         {activeTab === "pending" && (
           <PendingPage
             items={filteredPendingItems}
+            allPendingItems={pendingItems}
             totalItems={pendingItems.length}
             selectedCategory={pendingCategoryFilter}
             onCategoryChange={setPendingCategoryFilter}
+            onPrint={() => printView("purchase")}
             activeBuyer={activeBuyer}
             onBought={openBuyPopup}
             onUnavailable={markUnavailable}
@@ -1132,7 +1156,7 @@ export default function Home() {
         )}
 
         {activeTab === "phone-orders" && (
-          <PhoneOrderPage items={phoneOrderItems} onReturnToCheck={returnPhoneOrderToCheck} />
+          <PhoneOrderPage items={phoneOrderItems} onUpdate={updatePhoneOrderSnapshot} />
         )}
 
         {activeTab === "bought" && (
@@ -1187,12 +1211,15 @@ export default function Home() {
           <HistoryPage
             statuses={historyStatuses}
             groupedByStatus={groupedByStatus}
-            onPrint={() => window.print()}
+            onPrint={() => printView("history")}
           />
         )}
       </section>
 
-      <PrintSection items={items} />
+      {printMode === "history" && <PrintSection items={items} />}
+      {printMode === "purchase" && (
+        <PurchasePrintSection items={pendingItems} productCategoryByName={productCategoryByName} />
+      )}
       {priceModal && (
         <BuyPriceModal
           item={priceModal.item}
@@ -1604,12 +1631,21 @@ function ImportPinOverlay({
 
 function PhoneOrderPage({
   items,
-  onReturnToCheck,
+  onUpdate,
 }: {
   items: PhoneOrderItem[];
-  onReturnToCheck: (item: PhoneOrderItem) => void;
+  onUpdate: (
+    item: PhoneOrderItem,
+    updates: Pick<PhoneOrderItem, "quantity" | "unit" | "supplierName">,
+  ) => Promise<boolean>;
 }) {
   const [copiedSupplier, setCopiedSupplier] = useState("");
+  const [editingItem, setEditingItem] = useState<PhoneOrderItem | null>(null);
+  const [editQuantity, setEditQuantity] = useState("");
+  const [editUnit, setEditUnit] = useState<ProductUnit>(PRODUCT_UNITS[0]);
+  const [editSupplier, setEditSupplier] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [editError, setEditError] = useState("");
   const groupedItems = useMemo(() => {
     const groups = new Map<string, PhoneOrderItem[]>();
     for (const item of items) {
@@ -1635,6 +1671,30 @@ function PhoneOrderPage({
       logSupabaseError("Clipboard copy failed", error);
       window.alert("คัดลอกไม่สำเร็จ กรุณาอนุญาตการใช้งานคลิปบอร์ด");
     }
+  }
+
+  function openEditor(item: PhoneOrderItem) {
+    setEditingItem(item);
+    setEditQuantity(item.quantity);
+    setEditUnit(PRODUCT_UNITS.includes(item.unit as ProductUnit) ? item.unit as ProductUnit : PRODUCT_UNITS[0]);
+    setEditSupplier(item.supplierName);
+    setEditError("");
+  }
+
+  async function saveEdit() {
+    if (!editingItem || isSaving) return;
+    const quantity = editQuantity.trim();
+    const supplierName = editSupplier.trim();
+    if (!quantity || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0 || !supplierName) {
+      setEditError("กรุณากรอกจำนวนที่มากกว่า 0 และชื่อร้าน");
+      return;
+    }
+    setIsSaving(true);
+    setEditError("");
+    const succeeded = await onUpdate(editingItem, { quantity, unit: editUnit, supplierName });
+    setIsSaving(false);
+    if (succeeded) setEditingItem(null);
+    else setEditError("บันทึกไม่สำเร็จ กรุณาลองอีกครั้ง");
   }
 
   return (
@@ -1676,10 +1736,10 @@ function PhoneOrderPage({
                   </div>
                   <button
                     type="button"
-                    onClick={() => onReturnToCheck(item)}
-                    className="min-h-10 rounded-lg border border-market-amber/55 bg-market-amber/10 px-3 text-sm font-black text-amber-100"
+                    onClick={() => openEditor(item)}
+                    className="flex min-h-10 items-center justify-center gap-1 rounded-lg border border-sky-300/40 bg-sky-300/10 px-3 text-sm font-black text-sky-100"
                   >
-                    นำกลับไปเช็ค
+                    <Pencil className="h-4 w-4" /> แก้ไข
                   </button>
                 </div>
               ))}
@@ -1687,30 +1747,90 @@ function PhoneOrderPage({
           </article>
         ))}
       </div>
+
+      {editingItem && (
+        <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/75 px-3 py-5 backdrop-blur-sm">
+          <section className="w-full max-w-md rounded-lg border border-sky-300/35 bg-market-panel p-4 shadow-touch sm:p-5">
+            <h2 className="text-2xl font-black text-white">แก้ไขรายการโทรสั่ง</h2>
+            <div className="mt-4 grid gap-3">
+              <label>
+                <span className="mb-1 block text-sm font-black text-emerald-100/70">สินค้า</span>
+                <input value={editingItem.productName} readOnly className="h-12 w-full rounded-lg border border-white/10 bg-white/5 px-3 font-bold text-slate-300" />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label>
+                  <span className="mb-1 block text-sm font-black text-emerald-100/70">จำนวน *</span>
+                  <input value={editQuantity} onChange={(event) => setEditQuantity(event.target.value)} inputMode="decimal" className="h-12 w-full rounded-lg border border-market-line bg-market-ink px-3 font-black text-white outline-none focus:border-market-mint" />
+                </label>
+                <label>
+                  <span className="mb-1 block text-sm font-black text-emerald-100/70">หน่วย *</span>
+                  <select value={editUnit} onChange={(event) => setEditUnit(event.target.value as ProductUnit)} className="h-12 w-full rounded-lg border border-market-line bg-market-ink px-3 font-black text-white outline-none focus:border-market-mint">
+                    {PRODUCT_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                  </select>
+                </label>
+              </div>
+              <label>
+                <span className="mb-1 block text-sm font-black text-emerald-100/70">ชื่อร้าน *</span>
+                <input value={editSupplier} onChange={(event) => setEditSupplier(event.target.value)} className="h-12 w-full rounded-lg border border-market-line bg-market-ink px-3 font-bold text-white outline-none focus:border-market-mint" />
+              </label>
+              {editError && <p className="rounded-lg border border-market-red/50 bg-market-red/12 px-3 py-2 text-sm font-black text-red-100">{editError}</p>}
+            </div>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+              <button type="button" onClick={() => setEditingItem(null)} disabled={isSaving} className="min-h-12 rounded-lg border border-white/15 bg-white/5 px-4 font-black text-white">ยกเลิก</button>
+              <button type="button" onClick={() => void saveEdit()} disabled={isSaving} className="min-h-12 rounded-lg bg-market-green px-4 font-black text-market-ink disabled:bg-slate-600">
+                {isSaving ? "กำลังบันทึก..." : "บันทึก"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
 
 function PendingPage({
   items,
+  allPendingItems,
   totalItems,
   selectedCategory,
   onCategoryChange,
+  onPrint,
   activeBuyer,
   onBought,
   onUnavailable,
 }: {
   items: FreshBuyItem[];
+  allPendingItems: FreshBuyItem[];
   totalItems: number;
   selectedCategory: PendingCategoryFilter;
   onCategoryChange: (category: PendingCategoryFilter) => void;
+  onPrint: () => void;
   activeBuyer: BuyerName;
   onBought: (item: FreshBuyItem) => void;
   onUnavailable: (item: FreshBuyItem) => void;
 }) {
+  const [isCopied, setIsCopied] = useState(false);
   const countText = selectedCategory !== "ทั้งหมด"
     ? `รอซื้อ ${items.length} / ${totalItems} รายการ`
     : `รอซื้อ ${totalItems} รายการ`;
+
+  async function copyPendingItems() {
+    const text = [
+      "รายการซื้อวันนี้",
+      "",
+      ...allPendingItems.map((item) => `${item.name} ${item.quantity} ${item.unit}`),
+    ].join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setIsCopied(true);
+      window.setTimeout(() => setIsCopied(false), 2_000);
+      playBeep("soft");
+    } catch (error) {
+      logSupabaseError("Pending list clipboard copy failed", error);
+      window.alert("คัดลอกไม่สำเร็จ กรุณาอนุญาตการใช้งานคลิปบอร์ด");
+    }
+  }
 
   return (
     <section>
@@ -1735,6 +1855,22 @@ function PendingPage({
               {category}
             </button>
           ))}
+          <div className="ml-auto flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void copyPendingItems()}
+              className="flex min-h-10 items-center justify-center gap-2 rounded-lg border border-sky-300/45 bg-sky-300/12 px-3 text-sm font-black text-sky-100"
+            >
+              <Copy className="h-4 w-4" /> {isCopied ? "คัดลอกแล้ว" : "คัดลอกรายการ"}
+            </button>
+            <button
+              type="button"
+              onClick={onPrint}
+              className="flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white px-3 text-sm font-black text-market-ink"
+            >
+              <Printer className="h-4 w-4" /> พิมพ์รายการซื้อ
+            </button>
+          </div>
         </div>
       </div>
       {items.length === 0 ? (
@@ -2342,6 +2478,48 @@ function PrintSection({ items }: { items: FreshBuyItem[] }) {
               )}
             </tbody>
           </table>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PurchasePrintSection({
+  items,
+  productCategoryByName,
+}: {
+  items: FreshBuyItem[];
+  productCategoryByName: Record<string, ProductCategory>;
+}) {
+  const groupedItems = PRODUCT_CATEGORIES.map((category) => ({
+    category,
+    items: items.filter((item) =>
+      (productCategoryByName[normalizeProductName(item.name)] ?? "อื่นๆ") === category,
+    ),
+  })).filter((group) => group.items.length > 0);
+
+  return (
+    <section className="print-area hidden">
+      <div className="print-header">
+        <h1>FreshBuy Team OS - รายการซื้อวันนี้</h1>
+        <p>วันที่พิมพ์: {nowStamp()}</p>
+        <p>รอซื้อทั้งหมด: {items.length} รายการ</p>
+      </div>
+      <div className="purchase-print-grid">
+        {groupedItems.length === 0 ? (
+          <p className="print-empty">ไม่มีรายการรอซื้อ</p>
+        ) : groupedItems.map((group) => (
+          <section key={group.category} className="purchase-print-section">
+            <h2>{group.category} ({group.items.length})</h2>
+            <table className="purchase-print-table">
+              <thead><tr><th>รายการ</th><th>จำนวน</th><th>หน่วย</th></tr></thead>
+              <tbody>
+                {group.items.map((item) => (
+                  <tr key={item.id}><td>{item.name}</td><td>{item.quantity}</td><td>{item.unit}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
         ))}
       </div>
     </section>

@@ -320,4 +320,57 @@ button {
     height: 14px !important;
     border-bottom: 1px solid #111827 !important;
   }
+
+  .purchase-print-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 4mm !important;
+    align-items: start !important;
+  }
+
+  .purchase-print-section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .purchase-print-section h2 {
+    margin: 0 0 2px !important;
+    font-size: 12px !important;
+    font-weight: 800 !important;
+  }
+
+  .purchase-print-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+    color: #111827 !important;
+    background: #ffffff !important;
+    font-size: 11px !important;
+  }
+
+  .purchase-print-table th,
+  .purchase-print-table td {
+    height: 21px !important;
+    border: 0.45px solid #111827 !important;
+    padding: 2px 3px !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+
+  .purchase-print-table th {
+    font-weight: 800 !important;
+    text-align: center !important;
+  }
+
+  .purchase-print-table th:first-child,
+  .purchase-print-table td:first-child {
+    width: 64% !important;
+    font-weight: 700 !important;
+  }
+
+  .purchase-print-table th:not(:first-child),
+  .purchase-print-table td:not(:first-child) {
+    width: 18% !important;
+    text-align: center !important;
+  }
 }

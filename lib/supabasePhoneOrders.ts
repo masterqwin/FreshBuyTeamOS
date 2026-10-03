@@ -74,6 +74,25 @@ export async function appendPhoneOrderItem(item: PhoneOrderItem) {
   if (error) throw error;
 }
 
+export async function updatePhoneOrderItem(
+  id: string,
+  updates: Pick<PhoneOrderItem, "quantity" | "unit" | "supplierName">,
+): Promise<PhoneOrderItem> {
+  const client = requireClient();
+  const { data, error } = await client
+    .from("phone_order_items")
+    .update({
+      quantity: updates.quantity.trim(),
+      unit: updates.unit.trim(),
+      supplier_name: updates.supplierName.trim(),
+    })
+    .eq("id", id)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return toItem(data as PhoneOrderRow);
+}
+
 export async function deletePhoneOrderItem(id: string) {
   const client = requireClient();
   const { error } = await client.from("phone_order_items").delete().eq("id", id);
