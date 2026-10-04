@@ -473,7 +473,7 @@ export default function ProductCheckPage({
   }
 
   return (
-    <section>
+    <section className="pb-28 sm:pb-24">
       <div className="rounded-lg border border-white/10 bg-market-panel/92 p-3 shadow-touch sm:p-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -564,19 +564,6 @@ export default function ProductCheckPage({
           {productError}
         </div>
       )}
-
-      <div className="mt-3 flex flex-col gap-2 rounded-lg border border-market-green/35 bg-market-green/[0.08] p-3 sm:flex-row sm:items-center sm:justify-between">
-        <p className="font-black text-emerald-50">เลือกแล้ว {selectedProducts.length} รายการ</p>
-        <button
-          type="button"
-          onClick={() => void sendSelectedProducts()}
-          disabled={selectedProducts.length === 0 || isBulkSubmitting}
-          className="flex min-h-12 items-center justify-center gap-2 rounded-lg bg-market-green px-5 font-black text-market-ink disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
-        >
-          <Send className={`h-5 w-5 ${isBulkSubmitting ? "animate-pulse" : ""}`} />
-          {isBulkSubmitting ? "กำลังส่งรายการ..." : "ส่งรายการ"}
-        </button>
-      </div>
 
       <div className="mt-3 grid gap-2">
         {isLoading ? (
@@ -684,6 +671,23 @@ export default function ProductCheckPage({
             );
           })
         )}
+      </div>
+
+      <div className="fixed inset-x-3 bottom-3 z-40 mx-auto max-w-2xl rounded-xl border border-market-green/45 bg-market-panel/95 p-2.5 shadow-2xl backdrop-blur sm:bottom-4 sm:flex sm:items-center sm:justify-between sm:gap-3 sm:p-3">
+        <p className="mb-2 text-center text-sm font-black text-emerald-50 sm:mb-0 sm:text-left">
+          เลือกแล้ว {selectedProducts.length} รายการ
+        </p>
+        <button
+          type="button"
+          onClick={() => void sendSelectedProducts()}
+          disabled={selectedProducts.length === 0 || isBulkSubmitting}
+          className="flex min-h-12 w-full items-center justify-center gap-2 rounded-lg bg-market-green px-5 font-black text-market-ink disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300 sm:w-auto sm:min-w-56"
+        >
+          <Send className={`h-5 w-5 ${isBulkSubmitting ? "animate-pulse" : ""}`} />
+          {isBulkSubmitting
+            ? "กำลังส่งรายการ..."
+            : `ส่งรายการ ${selectedProducts.length} รายการ`}
+        </button>
       </div>
 
       <details className="mt-4 rounded-lg border border-white/10 bg-market-panel/72 p-3">

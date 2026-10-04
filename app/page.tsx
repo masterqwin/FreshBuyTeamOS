@@ -526,8 +526,9 @@ export default function Home() {
   }, []);
 
   const parsedRows = useMemo(() => parseImportText(pasteText), [pasteText]);
-  const summary = useMemo(() => getSummary(items), [items]);
   const pendingItems = items.filter((item) => item.status === "pending");
+  const summary = useMemo(() => getSummary(items), [items]);
+  const operationalTotal = pendingItems.length + phoneOrderItems.length;
   const filteredPendingItems = pendingItems.filter((item) => {
     if (pendingCategoryFilter === "ทั้งหมด") return true;
     const category = productCategoryByName[normalizeProductName(item.name)] ?? "อื่นๆ";
@@ -1067,9 +1068,10 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="no-print mx-auto grid max-w-7xl grid-cols-2 gap-2 px-3 pt-3 sm:gap-3 sm:px-4 sm:pt-5 md:grid-cols-5 lg:px-6">
-        <SummaryCard label="ต้องซื้อทั้งหมด" value={summary.total} tone="mint" />
-        <SummaryCard label="รอซื้อ" value={summary.pending} tone="blue" />
+      <section className="no-print mx-auto grid max-w-7xl grid-cols-2 gap-2 px-3 pt-3 sm:gap-3 sm:px-4 sm:pt-5 md:grid-cols-3 xl:grid-cols-6 lg:px-6">
+        <SummaryCard label="ต้องซื้อทั้งหมด" value={operationalTotal} tone="mint" />
+        <SummaryCard label="รายการซื้อวันนี้" value={pendingItems.length} tone="blue" />
+        <SummaryCard label="รายการโทรสั่ง" value={phoneOrderItems.length} tone="blue" />
         <SummaryCard label="ซื้อแล้ว" value={summary.bought} tone="green" />
         <SummaryCard label="ไม่มีของ" value={summary.unavailable} tone="red" />
         <SummaryCard label="วันที่ / เวลา" value={currentDateTime || "-"} tone="mint" />
@@ -1145,6 +1147,7 @@ export default function Home() {
           <PendingPage
             items={filteredPendingItems}
             allPendingItems={pendingItems}
+            productCategoryByName={productCategoryByName}
             totalItems={pendingItems.length}
             selectedCategory={pendingCategoryFilter}
             onCategoryChange={setPendingCategoryFilter}
@@ -1791,6 +1794,7 @@ function PhoneOrderPage({
 function PendingPage({
   items,
   allPendingItems,
+  productCategoryByName,
   totalItems,
   selectedCategory,
   onCategoryChange,
@@ -1801,6 +1805,7 @@ function PendingPage({
 }: {
   items: FreshBuyItem[];
   allPendingItems: FreshBuyItem[];
+  productCategoryByName: Record<string, ProductCategory>;
   totalItems: number;
   selectedCategory: PendingCategoryFilter;
   onCategoryChange: (category: PendingCategoryFilter) => void;
@@ -1815,11 +1820,17 @@ function PendingPage({
     : `รอซื้อ ${totalItems} รายการ`;
 
   async function copyPendingItems() {
-    const text = [
-      "รายการซื้อวันนี้",
-      "",
-      ...allPendingItems.map((item) => `${item.name} ${item.quantity} ${item.unit}`),
-    ].join("\n");
+    const categorySections = PRODUCT_CATEGORIES.map((category) => {
+      const categoryItems = allPendingItems.filter((item) =>
+        (productCategoryByName[normalizeProductName(item.name)] ?? "อื่นๆ") === category,
+      );
+      if (categoryItems.length === 0) return "";
+      return [
+        `รายการ ${category}`,
+        ...categoryItems.map((item) => `${item.name} ${item.quantity} ${item.unit}`),
+      ].join("\n");
+    }).filter(Boolean);
+    const text = ["รายการซื้อวันนี้", ...categorySections].join("\n\n");
 
     try {
       await navigator.clipboard.writeText(text);
